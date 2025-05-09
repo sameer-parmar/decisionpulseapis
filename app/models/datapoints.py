@@ -2,6 +2,9 @@
 from sqlalchemy import Column, Integer, String, Text, DateTime, Index, func, ForeignKey
 # from sqlalchemy.orm import relationship # If you need relationships later
 # from sqlalchemy.orm import declarative_base # Or your existing Base import
+from uuid import uuid4
+from sqlalchemy.dialects.mssql import UNIQUEIDENTIFIER as UUID # ✅ For SQL Server
+from sqlalchemy.orm import relationship
 
 from ..database import Base
 # If not, uncomment the next line:
@@ -9,20 +12,32 @@ from ..database import Base
 
 class Country(Base):
     __tablename__ = "countries"
-    id = Column(Integer, primary_key=True, index=True)
+    id = Column(UUID(as_uuid=True), primary_key=True, index=True, default=uuid4)
     name = Column(String(50), nullable=False, unique=True, index=True) # Added index
-
+    data_points = relationship("DataPoint", back_populates="country_obj")
 class Category(Base):
     __tablename__ = "categories"
-    id = Column(Integer, primary_key=True, index=True)
+    id = Column(UUID(as_uuid=True), primary_key=True, index=True, default=uuid4)
+    # Foreign Key to Category
+    country = Column(UUID(as_uuid=True), ForeignKey(Country.id), nullable=True, index=True) # Added index
     name = Column(String(50), nullable=False, unique=True, index=True) # Added index
-
+    country_rel = relationship("Country", backref="categories", lazy="joined")  
+    data_points = relationship("DataPoint", back_populates="category_obj")
 # --- NEW Brand Model ---
 class Brand(Base):
     __tablename__ = "brands"
-    id = Column(Integer, primary_key=True, index=True)
+    id = Column(UUID(as_uuid=True), primary_key=True, index=True, default=uuid4)
+    # Foreign Key to Country
+    country =  Column(UUID(as_uuid=True), ForeignKey(Country.id), nullable=True, index=True) # Added index
+    # Foreign Key to Category
+    category =  Column(UUID(as_uuid=True), ForeignKey(Category.id), nullable=True, index=True) # Added index
     # Increased length slightly, ensure unique and indexed for lookups
     name = Column(String(255), nullable=False, unique=True, index=True)
+
+    # Relationships for potential future use if Brand details are nested
+    country_obj_ref = relationship("Country", foreign_keys=[country])
+    category_obj_ref = relationship("Category", foreign_keys=[category])
+    data_points = relationship("DataPoint", back_populates="brand_obj") # Added for DataPointResponse
 
     def __repr__(self):
         return f"<Brand(id={self.id}, name='{self.name}')>"
@@ -30,11 +45,11 @@ class Brand(Base):
 class DataPoint(Base):
     __tablename__ = "data_points"
 
-    id = Column(Integer, primary_key=True, index=True)
+    id = Column(UUID(as_uuid=True), primary_key=True, index=True, default=uuid4)
     # Foreign Keys store IDs
-    country = Column(Integer, ForeignKey(Country.id), nullable=True, index=True)
-    category = Column(Integer, ForeignKey(Category.id), nullable=True, index=True) # Added index
-    brand = Column(Integer, ForeignKey(Brand.id), nullable=True, index=True) # MODIFIED: Now ForeignKey
+    country =  Column(UUID(as_uuid=True), ForeignKey(Country.id), nullable=True, index=True)
+    category =  Column(UUID(as_uuid=True), ForeignKey(Category.id), nullable=True, index=True) # Added index
+    brand =  Column(UUID(as_uuid=True), ForeignKey(Brand.id), nullable=True, index=True) # MODIFIED: Now ForeignKey
     # --- End Foreign Keys ---
 
     source_url = Column(Text, nullable=True)
@@ -44,8 +59,14 @@ class DataPoint(Base):
     metric = Column(String(255), nullable=True)
     metric_category = Column(String(50), nullable=True, default='general', index=True)
     value = Column(String(255), nullable=True)
+    unit = Column(String(50), nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now(), server_default=func.now())
+    # Relationships using user's defined names
+    brand_obj = relationship("Brand", back_populates="data_points", foreign_keys=[brand])
+    country_obj = relationship("Country", back_populates="data_points", foreign_keys=[country])
+    category_obj = relationship("Category", back_populates="data_points", foreign_keys=[category])
+
 
     # --- assign_category method remains the same ---
     def assign_category(self):
@@ -109,34 +130,32 @@ class DataPoint(Base):
         required_headers_lower = {h.lower() for h in required_headers}
 
         for header_lower in required_headers_lower:
-             csv_header_variants = [h for h in available_headers if h == header_lower]
-             if not csv_header_variants:
-                 original_case_header = next((h for h in required_headers if h.lower() == header_lower), header_lower)
-                 missing_required.append(original_case_header)
-                 continue
+            csv_header_variants = [h for h in available_headers if h == header_lower]
+            if not csv_header_variants:
+                original_case_header = next((h for h in required_headers if h.lower() == header_lower), header_lower)
+                missing_required.append(original_case_header)
+                continue
 
-             value = normalized_row.get(csv_header_variants[0])
-             if value is None or value == "":
-                 original_case_header = next((h for h in required_headers if h.lower() == header_lower), header_lower)
-                 missing_required.append(f"{original_case_header} (empty)")
+            value = normalized_row.get(csv_header_variants[0])
+            if value is None or value == "":
+                original_case_header = next((h for h in required_headers if h.lower() == header_lower), header_lower)
+                missing_required.append(f"{original_case_header} (empty)")
 
         if missing_required:
             print(f"Background task Warning: Skipping row due to missing/empty required fields: {missing_required} in row: {row}")
             return None
 
-        # Extract data using lowercase keys, map back to desired keys
         parsed_data['country_name'] = normalized_row.get('country', '')
         parsed_data['category_name'] = normalized_row.get('category', '')
-        parsed_data['brand_name'] = normalized_row.get('brand', '') # MODIFIED: Changed key name
+        parsed_data['brand_name'] = normalized_row.get('brand', '')
         parsed_data['year'] = normalized_row.get('year', '')
         parsed_data['metric'] = normalized_row.get('metric', '')
         parsed_data['value'] = normalized_row.get('value', '')
-        parsed_data['source_url'] = normalized_row.get('source url', '') # Handle space
+        parsed_data['source_url'] = normalized_row.get('source url', '') # Still get it, but don't require it
         parsed_data['summary'] = normalized_row.get('summary', None)
         parsed_data['insight'] = normalized_row.get('insight', '')
+        parsed_data['unit'] = normalized_row.get('unit', None)
 
-        # Optional: Add specific validation if needed (e.g., year format)
-        # ...
 
         return parsed_data
 
