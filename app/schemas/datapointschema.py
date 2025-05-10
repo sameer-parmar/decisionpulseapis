@@ -122,3 +122,44 @@ class Filters(BaseModel):
 class AvailableResponse(BaseModel):
     success: bool = True
     filters: Filters    
+
+class ChartSeries(BaseModel):
+    data: List[Any]
+    categories: List[str]
+
+class ChartItem(BaseModel):
+    title: str
+    type: str # "line", "bar", "metric"
+    unit: Optional[str]
+    series: ChartSeries
+
+class MetricSummary(BaseModel):
+    metric_name: str
+    unit: Optional[str]
+    charts: List[ChartItem]
+
+class ResponseMetadata(BaseModel):
+    metric_category_path: str
+    # Make selected_category_name optional here as it might not be initially provided
+    selected_category_name: Optional[str] = None
+    brand_name: Optional[str] = None
+    country_name: Optional[str] = None
+    year: Optional[str] = None
+    metric_name: Optional[str] = None
+    unit: Optional[str] = None
+    # You can add all applied filters here for clarity in the response
+
+# --- NEW Pydantic Models for Filter Options ---
+
+class FilterOptions(BaseModel):
+    categories: List[str] = Field(default_factory=list, description="Available main category names.")
+    brands: List[str] = Field(default_factory=list, description="Available brand names.")
+    countries: List[str] = Field(default_factory=list, description="Available country names.")
+    years: List[str] = Field(default_factory=list, description="Available years.")
+    metric_names: List[str] = Field(default_factory=list, description="Available metric names.")
+    units: List[str] = Field(default_factory=list, description="Available units of measurement.")
+
+class UniversalMetricCategorySummaryResponse(BaseModel):
+    metadata: ResponseMetadata
+    filters: FilterOptions
+    metrics: List[MetricSummary]
