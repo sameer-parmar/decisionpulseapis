@@ -314,29 +314,25 @@ def get_metric_category_summary(
     """
     Retrieves a structured summary of data points grouped by metric for a given
     metric category, with flexible filtering options, formatted for dashboard consumption.
-
-    Filters can be applied for:
-    - Main category (required)
-    - Brand (optional)
-    - Country (optional)
-    - Year (optional)
-    - Specific metric (optional)
-    - Unit of measurement (optional)
-
-    Generates potential line charts (for time series), bar charts (by country and brand),
-    and metric cards for each metric found in the filtered data, structured according to
-    the provided sample JSON.
     """
+    # Create a base query joining all relevant tables
     query_builder = db.query(
         DataPoint.metric,
         DataPoint.unit,
         DataPoint.year,
-        cast(DataPoint.value, Float).label("value"),
+        DataPoint.value,  # No need for cast since we'll handle conversion later
         Country.name.label("country_name"),
-        Brand.name.label("brand_name")
-    ).outerjoin(Country, DataPoint.country == Country.id).outerjoin(Brand, DataPoint.brand == Brand.id)
+        Brand.name.label("brand_name"),
+        Category.name.label("category_name")
+    ).join(
+        Category, DataPoint.category == Category.id
+    ).join(
+        Country, DataPoint.country == Country.id, isouter=True
+    ).join(
+        Brand, DataPoint.brand == Brand.id, isouter=True
+    )
 
-    query_builder = query_builder.join(Category, DataPoint.category == Category.id)
+    # Apply filters
     query_builder = query_builder.filter(func.lower(Category.name) == selected_category_name.lower())
     query_builder = query_builder.filter(func.lower(DataPoint.metric_category) == metric_category_path.lower())
 
@@ -345,10 +341,7 @@ def get_metric_category_summary(
     if country_name:
         query_builder = query_builder.filter(func.lower(Country.name) == country_name.lower())
     if year:
-        if "-" in year:
-            query_builder = query_builder.filter(DataPoint.year.like(f"%{year}%"))
-        else:
-            query_builder = query_builder.filter(DataPoint.year.like(f"%{year}%"))
+        query_builder = query_builder.filter(DataPoint.year.like(f"%{year}%"))
     if metric_name:
         query_builder = query_builder.filter(func.lower(DataPoint.metric).like(f"%{metric_name.lower()}%"))
     if unit:
@@ -356,139 +349,158 @@ def get_metric_category_summary(
 
     raw_data = query_builder.all()
 
+    # Create response metadata
     response_metadata = ResponseMetadata(
         metric_category_path=metric_category_path,
         selected_category_name=selected_category_name,
         brand_name=brand_name
     )
 
+    # Return empty response if no data found
     if not raw_data:
         return MetricCategorySummaryResponse(metadata=response_metadata, metrics=[])
 
-    grouped_metrics_formatted: Dict[str, Dict[str, Any]] = {}
-
+    # Process data and organize by metrics
+    metrics_data = {}
+    
     for row in raw_data:
-        metric_unit_key = f"{row.metric or 'Unknown Metric'} ({row.unit or 'Unknown Unit'})"
-        value = row.value if row.value is not None else 0.0
-
-        if metric_unit_key not in grouped_metrics_formatted:
-            grouped_metrics_formatted[metric_unit_key] = {
-                "id": metric_unit_key.lower().replace(" ", "-"), # Generate a unique ID
-                "title": row.metric or "Unknown Metric",
-                "unit": row.unit,
-                "type": "metric", # Default type, will be updated
+        # Ensure metric and unit exist
+        metric = row.metric or "Unknown Metric"
+        unit = row.unit or "Unknown Unit"
+        
+        # Create a unique ID for this metric
+        metric_id = f"{metric.lower().replace(' ', '-')}"
+        
+        # Convert value to float for calculations if possible
+        try:
+            value = float(row.value)
+        except (ValueError, TypeError):
+            value = 0.0
+            
+        # Initialize metric if not already in dictionary
+        if metric_id not in metrics_data:
+            metrics_data[metric_id] = {
+                "id": metric_id,
+                "title": metric,
+                "unit": unit,
+                "type": "metric",  # Default type, may be updated
                 "series": {"data": [], "categories": []},
-                "allSeries": {},
                 "filters": {},
                 "options": {},
-                "time_series_data": {}, # {year: value}
-                "country_data": {},    # {country: aggregated_value}
-                "brand_data": {}      # {brand: aggregated_value}
+                "allSeries": {},
+                # Data for chart generation
+                "by_year": {},
+                "by_country": {},
+                "by_brand": {}
             }
-
-        metric_data = grouped_metrics_formatted[metric_unit_key]
-        metric_data["series"]["data"].append(value) # Add all values initially
-
+        
+        # Add the value to the appropriate data structure
+        metrics_data[metric_id]["series"]["data"].append(value)
+        
+        # Group by year (for time series)
         if row.year:
-            metric_data["time_series_data"][row.year] = metric_data["time_series_data"].get(row.year, 0.0) + value
+            if row.year not in metrics_data[metric_id]["by_year"]:
+                metrics_data[metric_id]["by_year"][row.year] = []
+            metrics_data[metric_id]["by_year"][row.year].append(value)
+        
+        # Group by country
         if row.country_name:
-            metric_data["country_data"][row.country_name] = metric_data["country_data"].get(row.country_name, 0.0) + value
+            if row.country_name not in metrics_data[metric_id]["by_country"]:
+                metrics_data[metric_id]["by_country"][row.country_name] = []
+            metrics_data[metric_id]["by_country"][row.country_name].append(value)
+        
+        # Group by brand
         if row.brand_name:
-            metric_data["brand_data"][row.brand_name] = metric_data["brand_data"].get(row.brand_name, 0.0) + value
+            if row.brand_name not in metrics_data[metric_id]["by_brand"]:
+                metrics_data[metric_id]["by_brand"][row.brand_name] = []
+            metrics_data[metric_id]["by_brand"][row.brand_name].append(value)
 
-    final_metrics_list: List[Dict[str, Any]] = []
-    for key, metric_data in grouped_metrics_formatted.items():
-        charts: List[Dict[str, Any]] = []
-
-        # --- Time Series Chart ---
-        if len(metric_data["time_series_data"]) > 1:
-            sorted_years = sorted(metric_data["time_series_data"].keys())
-            line_series_data = [metric_data["time_series_data"][year] for year in sorted_years]
-            if any(val != 0.0 for val in line_series_data):
-                charts.append({
-                    "id": f"{metric_data['id']}-time-series",
-                    "title": f"{metric_data['title']} over time",
-                    "type": "line",
-                    "unit": metric_data["unit"],
-                    "series": {"data": line_series_data, "categories": sorted_years},
-                    "options": {"xaxis": {"categories": sorted_years}}
-                })
-                metric_data["type"] = "line" # Update type if a line chart is added
-
-        # --- Bar Chart by Country ---
-        if len(metric_data["country_data"]) > 1:
-            country_names = list(metric_data["country_data"].keys())
-            country_values = list(metric_data["country_data"].values())
-            if any(val != 0.0 for val in country_values):
-                charts.append({
-                    "id": f"{metric_data['id']}-country-bar",
-                    "title": f"{metric_data['title']} by Country",
-                    "type": "bar",
-                    "unit": metric_data["unit"],
-                    "series": {"data": country_values, "categories": country_names},
-                    "options": {"xaxis": {"categories": country_names}}
-                })
-                if metric_data["type"] == "metric":
-                    metric_data["type"] = "bar" # Update type if a bar chart is added
-
-                # Add filters for country if bar chart exists
+    # Process the collected data into final format
+    final_metrics = []
+    
+    for metric_id, metric_data in metrics_data.items():
+        # Process time series data (by year)
+        if metric_data["by_year"]:
+            years = sorted(metric_data["by_year"].keys())
+            # Calculate average for each year if there are multiple values
+            year_values = [
+                sum(metric_data["by_year"][year]) / len(metric_data["by_year"][year])
+                for year in years
+            ]
+            
+            # If we have multiple years, create a line chart
+            if len(years) > 1:
+                metric_data["type"] = "line"
+                metric_data["series"]["categories"] = years
+                metric_data["series"]["data"] = year_values
+                metric_data["options"] = {"xaxis": {"categories": years}}
+        
+        # Process country data
+        if metric_data["by_country"] and len(metric_data["by_country"]) > 1:
+            countries = sorted(metric_data["by_country"].keys())
+            # Calculate average for each country
+            country_values = [
+                sum(metric_data["by_country"][country]) / len(metric_data["by_country"][country])
+                for country in countries
+            ]
+            
+            # Create country filters
+            metric_data["filters"] = {
+                "type": "location",
+                "options": ["All"] + countries,
+                "default": "All"
+            }
+            
+            # Create allSeries structure for country filtering
+            metric_data["allSeries"] = {
+                "All": {
+                    "series": [{"data": country_values}],
+                    "options": {"xaxis": {"categories": countries}}
+                }
+            }
+            
+            # Add individual country data
+            for i, country in enumerate(countries):
+                metric_data["allSeries"][country] = {
+                    "series": [{"data": [country_values[i]]}],
+                    "options": {"xaxis": {"categories": [country]}}
+                }
+        
+        # Process brand data (optional, similar to country)
+        if metric_data["by_brand"] and len(metric_data["by_brand"]) > 1 and not metric_data["filters"]:
+            brands = sorted(metric_data["by_brand"].keys())
+            brand_values = [
+                sum(metric_data["by_brand"][brand]) / len(metric_data["by_brand"][brand])
+                for brand in brands
+            ]
+            
+            # If we haven't created filters yet, create them for brands
+            if not metric_data["filters"]:
                 metric_data["filters"] = {
-                    "type": "location",
-                    "options": ["All"] + sorted(country_names),
+                    "type": "brand",
+                    "options": ["All"] + brands,
                     "default": "All"
                 }
-                metric_data["allSeries"] = {"All": {"series": [{"data": country_values}], "options": {"xaxis": {"categories": country_names}}}}
-                for country, value in metric_data["country_data"].items():
-                    metric_data["allSeries"][country] = {"series": [{"data": [value]}], "options": {"xaxis": {"categories": [country]}}}
+                
+                metric_data["allSeries"] = {
+                    "All": {
+                        "series": [{"data": brand_values}],
+                        "options": {"xaxis": {"categories": brands}}
+                    }
+                }
+                
+                for i, brand in enumerate(brands):
+                    metric_data["allSeries"][brand] = {
+                        "series": [{"data": [brand_values[i]]}],
+                        "options": {"xaxis": {"categories": [brand]}}
+                    }
+        
+        # Clean up and remove temporary data structures
+        metric_data.pop("by_year", None)
+        metric_data.pop("by_country", None)
+        metric_data.pop("by_brand", None)
+        
+        # Add to final metrics list
+        final_metrics.append(metric_data)
 
-        # --- Bar Chart by Brand ---
-        if len(metric_data["brand_data"]) > 1:
-            brand_names = list(metric_data["brand_data"].keys())
-            brand_values = list(metric_data["brand_data"].values())
-            if any(val != 0.0 for val in brand_values):
-                charts.append({
-                    "id": f"{metric_data['id']}-brand-bar",
-                    "title": f"{metric_data['title']} by Brand",
-                    "type": "bar",
-                    "unit": metric_data["unit"],
-                    "series": {"data": brand_values, "categories": brand_names},
-                    "options": {"xaxis": {"categories": brand_names}}
-                })
-                if metric_data["type"] == "metric":
-                    metric_data["type"] = "bar" # Update type if a bar chart is added
-
-        # --- Metric Card ---
-        # Display a metric card if no other suitable chart type was generated
-        if not charts:
-            # Use the last value if available, or the sum
-            display_value = metric_data["series"]["data"][-1] if metric_data["series"]["data"] else 0
-            label = "Value"
-            if metric_data["time_series_data"] and len(metric_data["time_series_data"]) == 1:
-                label = list(metric_data["time_series_data"].keys())[0]
-            elif country_name and len(metric_data["country_data"]) == 1:
-                label = country_name
-            elif brand_name and len(metric_data["brand_data"]) == 1:
-                label = brand_name
-
-            charts.append({
-                "id": f"{metric_data['id']}-metric-card",
-                "title": metric_data["title"],
-                "type": "metric",
-                "unit": metric_data["unit"],
-                "series": {"data": [display_value], "categories": [label]}
-            })
-            metric_data["type"] = "metric"
-
-        # Structure the final metric item
-        final_metrics_list.append({
-            "id": metric_data["id"],
-            "title": metric_data["title"],
-            "unit": metric_data["unit"],
-            "type": metric_data["type"],
-            "series": metric_data["series"],
-            "filters": metric_data.get("filters"),
-            "options": metric_data.get("options"),
-            "allSeries": metric_data.get("allSeries")
-        })
-
-    return MetricCategorySummaryResponse(metadata=response_metadata, metrics=final_metrics_list)
+    return MetricCategorySummaryResponse(metadata=response_metadata, metrics=final_metrics)
