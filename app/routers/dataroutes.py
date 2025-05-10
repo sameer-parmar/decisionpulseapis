@@ -3,7 +3,7 @@ from app.schemas.datapointschema import CategoryWithCountry , CountrySchema, Bra
 from sqlalchemy.orm import Session
 from app.database import  get_db
 from typing import List,  Dict, Any, Optional, Tuple
-from sqlalchemy import Float, cast, func
+from sqlalchemy import Float, cast, distinct, func
 from app.schemas.datapointschema import Dataset
 from app.models.datapoints import Country
 from app.models.datapoints import Brand
@@ -295,6 +295,42 @@ class MetricCategorySummaryResponse(BaseModel):
     metrics: List[Dict[str, Any]] # Changed to a list of dictionaries
 
 router = APIRouter()
+@router.get("/category-metrics/{category_name}", response_model=List[Dict[str, Any]])
+def get_metrics_by_category(category_name: str, db: Session = Depends(get_db)):
+    """
+    Retrieves metric categories for a given category name.
+
+    This endpoint filters DataPoint records based on the provided category name
+    (case-insensitive) and returns a list of unique metric categories associated
+    with that category.  It no longer returns the individual metrics.
+
+    Args:
+        category_name (str): The name of the category to filter by.
+        db (Session, optional): The database session. Defaults to Depends(get_db).
+
+    Returns:
+        List[Dict[str, Any]]: A list of dictionaries, where each dictionary
+            contains a single key-value pair: "metric_category" and its
+            corresponding value (the name of the metric category).
+            Returns an empty list if no matching categories are found.
+    """
+    # Step 1: Query for distinct metric categories, filtered by category name.
+    results = (
+        db.query(distinct(DataPoint.metric_category))
+        .join(Category, DataPoint.category == Category.id)
+        .filter(func.lower(Category.name) == category_name.lower())
+        .all()
+    )
+
+    # Step 2:  Convert the result tuples into a list of dictionaries.
+    # The query returns a list of tuples, where each tuple contains a single
+    # element: the metric category.  We need to convert this into a list of
+    # dictionaries as specified by the response_model.
+    metric_categories = [{"metric_category": mc[0]} for mc in results]
+
+    return metric_categories
+
+
 
 @router.get(
     "/metric-category-summary/{metric_category_path}",
