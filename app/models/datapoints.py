@@ -1,173 +1,53 @@
-# models.py
-from sqlalchemy import Column, Integer, String, Text, DateTime, Index, func, ForeignKey
-# from sqlalchemy.orm import relationship # If you need relationships later
-# from sqlalchemy.orm import declarative_base # Or your existing Base import
-from uuid import uuid4
-from sqlalchemy.dialects.mssql import UNIQUEIDENTIFIER as UUID # ✅ For SQL Server
-from sqlalchemy.orm import relationship
+from sqlalchemy import Column, String, Float, DateTime, BigInteger
+from app.database import Base
 
-from ..database import Base
-# If not, uncomment the next line:
-# Base = declarative_base()
+class AutoMobileData(Base):
+    __tablename__ = 'auto_mobile_data'
+    __table_args__ = {"extend_existing": True}
 
-class Country(Base):
-    __tablename__ = "countries"
-    id = Column(UUID(as_uuid=True), primary_key=True, index=True, default=uuid4)
-    name = Column(String(50), nullable=False, unique=True, index=True) # Added index
-    data_points = relationship("DataPoint", back_populates="country_obj")
-class Category(Base):
-    __tablename__ = "categories"
-    id = Column(UUID(as_uuid=True), primary_key=True, index=True, default=uuid4)
-    # Foreign Key to Category
-    country = Column(UUID(as_uuid=True), ForeignKey(Country.id), nullable=True, index=True) # Added index
-    name = Column(String(50), nullable=False, unique=True, index=True) # Added index
-    country_rel = relationship("Country", backref="categories", lazy="joined")  
-    data_points = relationship("DataPoint", back_populates="category_obj")
-# --- NEW Brand Model ---
-class Brand(Base):
-    __tablename__ = "brands"
-    id = Column(UUID(as_uuid=True), primary_key=True, index=True, default=uuid4)
-    # Foreign Key to Country
-    country =  Column(UUID(as_uuid=True), ForeignKey(Country.id), nullable=True, index=True) # Added index
-    # Foreign Key to Category
-    category =  Column(UUID(as_uuid=True), ForeignKey(Category.id), nullable=True, index=True) # Added index
-    # Increased length slightly, ensure unique and indexed for lookups
-    name = Column(String(255), nullable=False, unique=True, index=True)
+    # use the existing invoice_id as primary key
+    invoice_id                   = Column(String,     primary_key=True)
+    booking_date                 = Column(DateTime,   nullable=True)
+    delivery_date                = Column(DateTime,   nullable=True)
+    sale_date                    = Column(DateTime,   nullable=True)
+    oem_name                     = Column(String,     nullable=True)
+    dealer_name                  = Column(String,     nullable=True)
+    region                       = Column(String,     nullable=True)
+    country                      = Column(String,     nullable=True)
+    state                        = Column(String,     nullable=True)
+    city                         = Column(String,     nullable=True)
+    vehicle_segment              = Column(String,     nullable=True)
+    vehicle_model                = Column(String,     nullable=True)
+    variant                      = Column(String,     nullable=True)
+    year                         = Column(BigInteger, nullable=True)
+    fuel_type                    = Column(String,     nullable=True)
+    transmission_type            = Column(String,     nullable=True)
+    engine_displacement_cc       = Column(BigInteger, nullable=True)
+    color                        = Column(String,     nullable=True)
+    type_of_fuel_used_postsale   = Column(String,     nullable=True)
+    range_km                     = Column(Float,      nullable=True)
+    battery_capacity_kwh         = Column(Float,      nullable=True)
+    charging_time_hours          = Column(Float,      nullable=True)
+    competitor_model_name        = Column(String,     nullable=True)
+    competitor_oem               = Column(String,     nullable=True)
+    competitor_price             = Column(BigInteger, nullable=True)
 
-    # Relationships for potential future use if Brand details are nested
-    country_obj_ref = relationship("Country", foreign_keys=[country])
-    category_obj_ref = relationship("Category", foreign_keys=[category])
-    data_points = relationship("DataPoint", back_populates="brand_obj") # Added for DataPointResponse
+    # map to the actual DB columns that end with an underscore:
+    market_share_in_region       = Column("market_share_in_region_", Float,    nullable=True)
+    salesperson_name             = Column(String,     nullable=True)
+    units_sold                   = Column(BigInteger, nullable=True)
+    unit_price                   = Column("unit_price_", BigInteger, nullable=True)
+    discount_offered             = Column("discount_offered_", BigInteger, nullable=True)
+    final_price_after_discount   = Column("final_price_after_discount_", Float,   nullable=True)
 
-    def __repr__(self):
-        return f"<Brand(id={self.id}, name='{self.name}')>"
-
-class DataPoint(Base):
-    __tablename__ = "data_points"
-
-    id = Column(UUID(as_uuid=True), primary_key=True, index=True, default=uuid4)
-    # Foreign Keys store IDs
-    country =  Column(UUID(as_uuid=True), ForeignKey(Country.id), nullable=True, index=True)
-    category =  Column(UUID(as_uuid=True), ForeignKey(Category.id), nullable=True, index=True) # Added index
-    brand =  Column(UUID(as_uuid=True), ForeignKey(Brand.id), nullable=True, index=True) # MODIFIED: Now ForeignKey
-    # --- End Foreign Keys ---
-
-    source_url = Column(Text, nullable=True)
-    insight = Column(Text, nullable=False)
-    summary = Column(Text, nullable=True)
-    year = Column(String(50), nullable=True)
-    metric = Column(String(255), nullable=True)
-    metric_category = Column(String(50), nullable=True, default='general', index=True)
-    value = Column(String(255), nullable=True)
-    unit = Column(String(50), nullable=True)
-    created_at = Column(DateTime(timezone=True), server_default=func.now())
-    updated_at = Column(DateTime(timezone=True), onupdate=func.now(), server_default=func.now())
-    # Relationships using user's defined names
-    brand_obj = relationship("Brand", back_populates="data_points", foreign_keys=[brand])
-    country_obj = relationship("Country", back_populates="data_points", foreign_keys=[country])
-    category_obj = relationship("Category", back_populates="data_points", foreign_keys=[category])
-
-
-    # --- assign_category method remains the same ---
-    def assign_category(self):
-        """
-        Attempts to assign a metric category based on metric, insight, or summary.
-        Call this method *after* creating the DataPoint instance and *before* saving.
-        """
-        # ... (assign_category logic remains unchanged) ...
-        metric_lower = str(self.metric).lower() if self.metric else ""
-        insight_summary_lower = (str(self.insight or '') + " " + str(self.summary or '')).lower().strip()
-        assigned_category = 'general' # Default
-
-        if metric_lower:
-            if any(kw in metric_lower for kw in ['sku productivity', 'top skus', 'sku proliferation', 'sku rationalization']):
-                assigned_category = 'portfolio_strategy';
-            elif any(kw in metric_lower for kw in ['margin', 'ebitda', 'working capital', 'revenue per employee', 'turnover', 'profit', 'finance cost', 'investment', 'funding', 'worth', 'expenses']):
-                 assigned_category = 'financial_health';
-            elif any(kw in metric_lower for kw in ['nps', 'net promoter', 'brand awareness', 'brand recall', 'perceived value', 'purchase intent', 'brand consciousness', 'respondents planning to buy']):
-                 assigned_category = 'consumer_insights';
-            elif any(kw in metric_lower for kw in ['geography', 'region', 'rural', 'urban', 'penetration by region', 'number of stores', 'number of outlets']):
-                 assigned_category = 'regional_performance';
-            elif any(kw in metric_lower for kw in ['fill rate', 'lead time', 'otif', 'on-time in-full', 'wastage', 'spoilage', 'capacity utilization', 'distribution network', 'stock turnover']):
-                 assigned_category = 'supply_chain';
-            elif any(kw in metric_lower for kw in ['share of voice', 'price index', 'competitor', 'market share']):
-                 assigned_category = 'competitive_intelligence';
-            elif any(kw in metric_lower for kw in ['online sales', 'e-commerce', 'digital', 'conversion rate', 'cart abandonment', 'digital shelf', 'search share', 'devices sold', 'etail share', 'gross merchandise value', 'gmv']):
-                 assigned_category = 'ecommerce_digital';
-            elif any(kw in metric_lower for kw in ['channel conflict', 'distributor roi', 'partner satisfaction']):
-                 assigned_category = 'trade_channel';
-            elif any(kw in metric_lower for kw in ['break-even', 'scenario', 'volume vs value', 'elasticity']):
-                 assigned_category = 'strategic_levers';
-            elif any(kw in metric_lower for kw in ['growth', 'performance', 'sales', 'revenue', 'output']):
-                if 'region' in insight_summary_lower: assigned_category = 'regional_performance'
-                elif 'e-commerce' in insight_summary_lower or 'online' in insight_summary_lower: assigned_category = 'ecommerce_digital'
-                else: assigned_category = 'financial_health'
-
-        elif insight_summary_lower:
-             if any(kw in insight_summary_lower for kw in ['sku']): assigned_category = 'portfolio_strategy'
-             elif any(kw in insight_summary_lower for kw in ['margin', 'profit', 'turnover']): assigned_category = 'financial_health'
-             elif any(kw in insight_summary_lower for kw in ['nps', 'consumer']): assigned_category = 'consumer_insights'
-             elif any(kw in insight_summary_lower for kw in ['region', 'store']): assigned_category = 'regional_performance'
-             elif any(kw in insight_summary_lower for kw in ['supply', 'distribution', 'logistics']): assigned_category = 'supply_chain'
-             elif any(kw in insight_summary_lower for kw in ['competitor', 'market share']): assigned_category = 'competitive_intelligence'
-             elif any(kw in insight_summary_lower for kw in ['online', 'e-commerce', 'digital', 'gmv']): assigned_category = 'ecommerce_digital'
-
-        self.metric_category = assigned_category
-
-    @classmethod
-    def parse_csv_row(cls, row: dict, expected_headers: set, required_headers: set) -> dict | None:
-        """
-        Parses and validates data from a CSV row dictionary.
-
-        Returns:
-            A dictionary containing the cleaned data if valid, otherwise None.
-            Includes 'country_name', 'category_name', and 'brand_name' as strings.
-        """
-        normalized_row = {str(k).strip().lower(): str(v).strip() for k, v in row.items() if k is not None}
-        parsed_data = {}
-        missing_required = []
-        available_headers = set(normalized_row.keys())
-        required_headers_lower = {h.lower() for h in required_headers}
-
-        for header_lower in required_headers_lower:
-            csv_header_variants = [h for h in available_headers if h == header_lower]
-            if not csv_header_variants:
-                original_case_header = next((h for h in required_headers if h.lower() == header_lower), header_lower)
-                missing_required.append(original_case_header)
-                continue
-
-            value = normalized_row.get(csv_header_variants[0])
-            if value is None or value == "":
-                original_case_header = next((h for h in required_headers if h.lower() == header_lower), header_lower)
-                missing_required.append(f"{original_case_header} (empty)")
-
-        if missing_required:
-            print(f"Background task Warning: Skipping row due to missing/empty required fields: {missing_required} in row: {row}")
-            return None
-
-        parsed_data['country_name'] = normalized_row.get('country', '')
-        parsed_data['category_name'] = normalized_row.get('category', '')
-        parsed_data['brand_name'] = normalized_row.get('brand', '')
-        parsed_data['year'] = normalized_row.get('year', '')
-        parsed_data['metric'] = normalized_row.get('metric', '')
-        parsed_data['value'] = normalized_row.get('value', '')
-        parsed_data['source_url'] = normalized_row.get('source url', '') # Still get it, but don't require it
-        parsed_data['summary'] = normalized_row.get('summary', None)
-        parsed_data['insight'] = normalized_row.get('insight', '')
-        parsed_data['unit'] = normalized_row.get('unit', None)
-
-
-        return parsed_data
-
-    def __repr__(self):
-        # MODIFIED: Updated repr to show FK IDs
-        return (f"<DataPoint(id={self.id}, metric='{self.metric}', year='{self.year}', "
-                f"country_id={self.country}, category_id={self.category}, brand_id={self.brand})>")
-
-# Optional: Add relationships if needed for querying
-# Country.data_points = relationship("DataPoint", back_populates="country_rel")
-# Category.data_points = relationship("DataPoint", back_populates="category_rel")
-# Brand.data_points = relationship("DataPoint", back_populates="brand_rel")
-# DataPoint.country_rel = relationship("Country", back_populates="data_points")
-# DataPoint.category_rel = relationship("Category", back_populates="data_points")
-# DataPoint.brand_rel = relationship("Brand", back_populates="data_points") 
+    customer_type                = Column(String,     nullable=True)
+    finance_opted_yesno          = Column(String,     nullable=True)
+    financing_partner            = Column(String,     nullable=True)
+    exchange_vehicle_offered     = Column(String,     nullable=True)
+    lead_source                  = Column(String,     nullable=True)
+    promotion_scheme_applied     = Column(String,     nullable=True)
+    accessories_bundle           = Column(String,     nullable=True)
+    free_services_offered        = Column(BigInteger, nullable=True)
+    nps_customer_feedback        = Column(BigInteger, nullable=True)
+    complaint_registered_yn      = Column(String,     nullable=True)
+    delivery_rating_15           = Column(BigInteger, nullable=True)

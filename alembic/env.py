@@ -4,7 +4,7 @@ from alembic import context
 
 from app.config import settings
 from app.database import Base
-from app.models.datapoints import DataPoint, Category, Country  # Import the model to register metadata
+from app.models import datapoints  # Import the model to register metadata
 
 # Alembic Config object
 config = context.config
