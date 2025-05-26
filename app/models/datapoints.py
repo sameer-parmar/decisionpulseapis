@@ -1,6 +1,21 @@
-from sqlalchemy import Column, String, Float, DateTime, BigInteger
+from sqlalchemy import UUID, Column, String, Float, DateTime, BigInteger, Integer, ForeignKey, Text
 from app.database import Base
+import uuid
 
+class Dashboard(Base):
+    __tablename__ = 'dashboards'
+    id = Column(String(36), primary_key=True, default=str(uuid.uuid4()))
+    name = Column(String(255), unique=True, nullable=False)
+    description = Column(String, nullable=True)
+# NEW MODEL - Add this to your existing models
+class DashboardTab(Base):
+    __tablename__ = 'dashboard_tabs'
+    
+    id = Column(String(36), primary_key=True, default=str(uuid.uuid4()))
+    dashboard_id = Column(String(36), ForeignKey('dashboards.id'), nullable=False)
+    tab_name = Column(String(255), nullable=False)
+    tab_data = Column(Text, nullable=True)  # Will store JSON string
+    created_at = Column(DateTime, nullable=True)
 class AutoMobileData(Base):
     __tablename__ = 'auto_mobile_data'
     __table_args__ = {"extend_existing": True}
@@ -33,12 +48,12 @@ class AutoMobileData(Base):
     competitor_price             = Column(BigInteger, nullable=True)
 
     # map to the actual DB columns that end with an underscore:
-    market_share_in_region       = Column("market_share_in_region_", Float,    nullable=True)
+    market_share_in_region       = Column( Float,    nullable=True)
     salesperson_name             = Column(String,     nullable=True)
     units_sold                   = Column(BigInteger, nullable=True)
-    unit_price                   = Column("unit_price_", BigInteger, nullable=True)
-    discount_offered             = Column("discount_offered_", BigInteger, nullable=True)
-    final_price_after_discount   = Column("final_price_after_discount_", Float,   nullable=True)
+    unit_price                   = Column( BigInteger, nullable=True)
+    discount_offered             = Column( BigInteger, nullable=True)
+    final_price_after_discount   = Column( Float,   nullable=True)
 
     customer_type                = Column(String,     nullable=True)
     finance_opted_yesno          = Column(String,     nullable=True)
@@ -51,3 +66,4 @@ class AutoMobileData(Base):
     nps_customer_feedback        = Column(BigInteger, nullable=True)
     complaint_registered_yn      = Column(String,     nullable=True)
     delivery_rating_15           = Column(BigInteger, nullable=True)
+    dashboard_id                 = Column(String(36), ForeignKey('dashboards.id'), nullable=True)

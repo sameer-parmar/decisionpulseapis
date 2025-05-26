@@ -1,36 +1,19 @@
-from fastapi import APIRouter, UploadFile, File, HTTPException, BackgroundTasks
-from sqlalchemy import create_engine
+from fastapi import APIRouter, UploadFile, File, HTTPException, BackgroundTasks, Depends
+from sqlalchemy import create_engine, MetaData, Table, select
 import io
 import os
 import pandas as pd
 import re
-
 from sqlalchemy.orm import Session
 from collections import defaultdict
 from datetime import datetime
-from typing import Dict, List, Any
+from typing import Dict, List, Any, Optional
 
+# Assuming these are correctly imported from your project structure
 from app.database import get_db
-
-# IMPORTANT: You'll need to install openpyxl: pip install openpyxl
-import openpyxl
-
+from app.utils.charts import chart_functions # This import is for the descriptive-data-api, not directly used in the new endpoints, but kept for context.
 from app.config import settings
-from typing import Optional
-from fastapi import APIRouter, Depends
-from sqlalchemy.orm import Session
-from app.database import get_db  # Your DB session dependency
-from app.models.datapoints import AutoMobileData  # Your SQLAlchemy Sale model
-from collections import defaultdict
-from datetime import datetime
-from fastapi import APIRouter, Depends
-from sqlalchemy import MetaData, Table, select
-from sqlalchemy.orm import Session
-from app.database import get_db
-from collections import defaultdict
-from datetime import datetime
-from typing import Dict, Any, List
-
+from app.models.datapoints import AutoMobileData # Your SQLAlchemy Sale model
 
 router = APIRouter()
 
@@ -38,6 +21,10 @@ UPLOAD_DIR = "uploaded_files"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 def process_data_dump(file_bytes: bytes, original_filename: str, db_url: str, table_name: str):
+    """
+    Processes the uploaded file (CSV or XLSX) and dumps its content into the database.
+    This function is intended to be run as a background task.
+    """
     print(f"Starting batch‐safe dump for '{original_filename}' → '{table_name}'")
     engine = create_engine(db_url, echo=True)
 
@@ -59,26 +46,35 @@ def process_data_dump(file_bytes: bytes, original_filename: str, db_url: str, ta
         print("No data found in file; exiting.")
         return
 
-    # Clean up column names
+    # Clean up column names to match database schema
     df.columns = [
         re.sub(r'[^a-z0-9_]', '', col.strip().lower().replace(' ', '_'))
         for col in df.columns
     ]
 
+    # Rename specific columns to match the AutoMobileData model's mapped names
+    df.rename(columns={
+        'market_share_in_region_': 'market_share_in_region',
+        'unit_price_': 'unit_price',
+        'discount_offered_': 'discount_offered',
+        'final_price_after_discount_': 'final_price_after_discount'
+    }, inplace=True)
+
+
     num_cols = len(df.columns)
-    # Compute max rows per batch so that rows * cols ≤ 2100
+    # Compute max rows per batch so that rows * cols ≤ 2100 (a heuristic for batch size)
     max_rows = max(1, 2100 // num_cols)
     total = len(df)
     print(f"{total} rows; {num_cols} cols → batching {max_rows} rows per chunk")
 
-    # Loop and insert
+    # Loop and insert data in chunks
     for idx in range(0, total, max_rows):
         chunk = df.iloc[idx : idx + max_rows]
         print(f"Inserting rows {idx}–{idx + len(chunk) - 1}...")
         chunk.to_sql(
             name=table_name,
             con=engine,
-            if_exists='replace' if idx == 0 else 'append',
+            if_exists='replace' if idx == 0 else 'append', # 'replace' for first chunk, 'append' for subsequent
             index=False,
             method=None   # default, one INSERT per row under the hood
         )
@@ -94,6 +90,10 @@ async def upload_raw_data(
     table_name: str = "auto_mobile_data",
     save_file: Optional[bool] = False
 ):
+    """
+    Endpoint to upload raw data files (CSV or XLSX) for processing and database dumping.
+    The actual data processing is offloaded to a background task.
+    """
     if not file.filename:
         raise HTTPException(400, "No file uploaded.")
 
@@ -101,6 +101,7 @@ async def upload_raw_data(
     if ext not in ('csv', 'xlsx'):
         raise HTTPException(400, "Only .csv or .xlsx supported.")
 
+    # Clean and validate table name to prevent SQL injection or invalid names
     cleaned_name = re.sub(r'[^a-zA-Z0-9_]', '', table_name.strip().lower())
     if not re.match(r'^[a-zA-Z_]\w*$', cleaned_name):
         raise HTTPException(400, "Invalid table name after cleaning.")
@@ -128,17 +129,19 @@ async def upload_raw_data(
         "message": f"Received '{file.filename}'. Batch processing started.",
         "table": cleaned_name
     }
-    
-    
-    
 
-@router.get("/descriptive-data-api", response_model=List[Dict[str, Any]])
+# Existing endpoint for descriptive data, kept for context
+# @router.get("/descriptive-data-api", response_model=List[Dict[str, Any]])
 async def descriptive_data_api(
     db: Session = Depends(get_db),
     country: str = None,
     brand: str = None
 ):
-    # 1) Reflect the table
+    """
+    Retrieves and aggregates various charts based on the automobile data.
+    Allows filtering by country and brand.
+    """
+    # Reflect the table for dynamic access
     metadata = MetaData()
     auto_table = Table(
         'auto_mobile_data',
@@ -146,14 +149,14 @@ async def descriptive_data_api(
         autoload_with=db.bind
     )
 
-    # 2) Fetch every row as a dict
+    # Fetch every row as a dictionary
     rows: List[Dict[str, Any]] = (
         db.execute(select(auto_table))
           .mappings()
           .all()
     )
 
-    # --- FILTERING ---
+    # Filter rows based on provided country and brand
     filtered_rows = []
     for r in rows:
         if country and r.get("country") and r["country"].lower() != country.lower():
@@ -163,408 +166,404 @@ async def descriptive_data_api(
         filtered_rows.append(r)
     rows = filtered_rows
 
-    # --- KPI AGGREGATION ---
-    monthly_sales      = defaultdict(lambda: defaultdict(int))
-    units_vs_price     = defaultdict(list)
-    city_scores        = defaultdict(list)
-    fuel_trans         = defaultdict(lambda: defaultdict(int))
-    state_acc          = defaultdict(lambda: {"units":0,"mkt_total":0.0,"count":0})
-    delays             = defaultdict(list)
-    disc_vs_units      = defaultdict(list)
-    dr_complaints      = defaultdict(lambda: {"ratings": [], "complaints": 0})
-    comp_vs_final      = []
-    ev_metrics         = []
+    # Dynamically generate charts using predefined chart functions
+    charts = []
+    for fn in chart_functions:
+        try:
+            charts.append(fn(rows))
+        except Exception as e:
+            charts.append({"id": fn.__name__, "error": str(e)})
+    return charts
 
-    # --- NEW AGGREGATIONS ---
-    oem_units          = defaultdict(int)
-    competitor_units   = defaultdict(int)
-    model_units        = defaultdict(int)
-    brand_discount     = defaultdict(list)
-    segment_trend      = defaultdict(lambda: defaultdict(int))
-    finance_by_cust    = defaultdict(lambda: {"finance_yes": 0, "total": 0})
+# --- NEW ENDPOINTS ---
+
+# ... (imports and existing upload_raw_data, descriptive_data_api)
+
+# @router.get("/sales-performance-kpis", response_model=Dict[str, Any])
+async def get_sales_performance_kpis(
+    db: Session = Depends(get_db),
+    country: Optional[str] = None,
+    region: Optional[str] = None,
+    oem_name: Optional[str] = None
+):
+    """
+    Provides key performance indicators for Global & Regional Sales Performance.
+    Includes Total Units Sold, Market Share by OEM and Competitor, and Average Selling Price.
+    Filters can be applied by country, region, and OEM name.
+    """
+    # Fetch all data from the AutoMobileData model
+    query = db.query(AutoMobileData)
+
+    # Apply filters based on query parameters
+    if country:
+        query = query.filter(AutoMobileData.country.ilike(f"%{country}%"))
+    if region:
+        query = query.filter(AutoMobileData.region.ilike(f"%{region}%"))
+    if oem_name:
+        query = query.filter(AutoMobileData.oem_name.ilike(f"%{oem_name}%"))
+
+    all_data = query.all()
+
+    # FIX: Convert SQLAlchemy objects to dictionaries for easier processing
+    rows = []
+    for row in all_data:
+        # Take everything in __dict__ except SQLAlchemy’s internal state
+        row_dict = {
+            k: v
+            for k, v in row.__dict__.items()
+            if not k.startswith("_sa_instance_state")
+        }
+        rows.append(row_dict)
+
+    total_units_sold = 0
+    total_revenue = 0
+    oem_units_sold = defaultdict(int)
+    competitor_units_sold = defaultdict(int)
 
     for r in rows:
-        # parse dates if needed
-        sale_date = r.get("sale_date")
-        booking   = r.get("booking_date")
-        delivery  = r.get("delivery_date")
-
-        # OEM / month KPI
-        if sale_date and r.get("oem_name"):
-            ym = sale_date.strftime("%Y-%m")
-            monthly_sales[ym][r["oem_name"]] += 1
-
-        # Units vs Final Price by region
-        region = r.get("region")
-        u = r.get("units_sold")
-        fp = r.get("final_price_after_discount") or r.get("final_price_after_discount_")
-        if region and u is not None and fp is not None:
-            units_vs_price[region].append({"units_sold": u, "final_price": fp})
-
-        # NPS by city
-        city = r.get("city")
-        nps  = r.get("nps_customer_feedback")
-        if city and nps is not None:
-            city_scores[city].append(nps)
-
-        # Fuel vs transmission
-        ft = r.get("fuel_type")
-        tt = r.get("transmission_type")
-        if ft and tt and u is not None:
-            fuel_trans[ft][tt] += u
-
-        # State‐wise market share
-        st = r.get("state")
-        ms = r.get("market_share_in_region") or r.get("market_share_in_region_")
-        if st and u is not None and ms is not None:
-            acc = state_acc[st]
-            acc["units"]     += u
-            acc["mkt_total"] += ms
-            acc["count"]     += 1
-
-        # Delivery delay by OEM
-        oem = r.get("oem_name")
-        if oem and booking and delivery:
-            delays[oem].append((delivery - booking).days)
-
-        # Discount vs units by customer
-        ct = r.get("customer_type")
-        disc = r.get("discount_offered") or r.get("discount_offered_")
-        if ct and disc is not None and u is not None:
-            disc_vs_units[ct].append({"discount": disc, "units_sold": u})
-
-        # Delivery rating vs complaints by dealer
-        dlr = r.get("delivery_rating_15")
-        dlr_yes = r.get("complaint_registered_yn", "").lower() == "yes"
-        dealer = r.get("dealer_name")
-        if dealer and dlr is not None:
-            info = dr_complaints[dealer]
-            info["ratings"].append(dlr)
-            if dlr_yes:
-                info["complaints"] += 1
-
-        # Competitor vs final price
-        cp = r.get("competitor_price")
-        if cp is not None and fp is not None:
-            comp_vs_final.append({
-                "oem": oem,
-                "competitor_price": cp,
-                "final_price": fp
-            })
-
-        # EV metrics
-        if ft and "electric" in ft.lower():
-            rng = r.get("range_km")
-            bat = r.get("battery_capacity_kwh")
-            chg = r.get("charging_time_hours")
-            if rng is not None and bat is not None and chg is not None:
-                ev_metrics.append({
-                    "oem": oem,
-                    "range_km": rng,
-                    "battery_kwh": bat,
-                    "charging_time_hr": chg
-                })
-
-        # Market share by OEM and competitor_oem
+        units = r.get("units_sold", 0)
+        final_price = r.get("final_price_after_discount", 0.0)
         oem = r.get("oem_name")
         competitor = r.get("competitor_oem")
-        u = r.get("units_sold")
-        if oem and u is not None:
-            oem_units[oem] += u
-        if competitor and u is not None:
-            competitor_units[competitor] += u
 
-        # Top selling models
-        model = r.get("vehicle_model")
-        if model and u is not None:
-            model_units[model] += u
+        total_units_sold += units
+        total_revenue += (final_price * units) # Calculate total revenue for ASP
 
-        # Average discount by brand
-        disc = r.get("discount_offered") or r.get("discount_offered_")
-        if oem and disc is not None:
-            brand_discount[oem].append(disc)
+        if oem:
+            oem_units_sold[oem] += units
+        if competitor:
+            competitor_units_sold[competitor] += units
 
-        # Sales trend by vehicle segment
-        segment = r.get("vehicle_segment")
-        sale_date = r.get("sale_date")
-        if segment and sale_date and u is not None:
-            ym = sale_date.strftime("%Y-%m")
-            segment_trend[segment][ym] += u
+    # Calculate Market Share for OEMs
+    market_share_by_oem = []
+    if total_units_sold > 0:
+        for oem, units in oem_units_sold.items():
+            market_share_by_oem.append({
+                "oem": oem,
+                "units_sold": units,
+                "market_share_percent": round((units / total_units_sold) * 100, 2)
+            })
+    # Sort by market share descending
+    market_share_by_oem = sorted(market_share_by_oem, key=lambda x: x["market_share_percent"], reverse=True)
 
-        # Finance opted ratio by customer type
+    # Calculate Market Share for Competitor OEMs
+    total_competitor_units_sold = sum(competitor_units_sold.values())
+    market_share_by_competitor_oem = []
+    if total_competitor_units_sold > 0:
+        for comp, units in competitor_units_sold.items():
+            market_share_by_competitor_oem.append({
+                "competitor_oem": comp,
+                "units_sold": units,
+                "market_share_percent": round((units / total_competitor_units_sold) * 100, 2)
+            })
+    # Sort by market share descending
+    market_share_by_competitor_oem = sorted(market_share_by_competitor_oem, key=lambda x: x["market_share_percent"], reverse=True)
+
+
+    # Calculate Average Selling Price (ASP)
+    average_selling_price = total_revenue / total_units_sold if total_units_sold > 0 else 0.0
+
+    return {
+        "total_units_sold": {
+            "type": "bar",
+            "title": "Total Units Sold by OEM",
+            "x": "oem",
+            "y": "units_sold",
+            "data": [{"oem": oem, "units_sold": units} for oem, units in oem_units_sold.items()]
+        },
+        "average_selling_price": {
+            "type": "value",
+            "title": "Average Selling Price",
+            "value": round(average_selling_price, 2)
+        },
+        "market_share_by_oem": {
+            "type": "bar",
+            "title": "Market Share by OEM",
+            "x": "oem",
+            "y": "market_share_percent",
+            "data": market_share_by_oem
+        },
+        "market_share_by_competitor_oem": {
+            "type": "bar",
+            "title": "Market Share by Competitor OEM",
+            "x": "competitor_oem",
+            "y": "market_share_percent",
+            "data": market_share_by_competitor_oem
+        }
+    }
+
+# @router.get("/supply-aftersales-kpis", response_model=Dict[str, Any])
+async def get_supply_aftersales_kpis(
+    db: Session = Depends(get_db),
+    region: Optional[str] = None,
+    country: Optional[str] = None,
+    dealer_name: Optional[str] = None
+):
+    """
+    Provides key performance indicators for Supply Chain Efficiency and After-Sales & Service Operations.
+    Includes Average Delivery Time, Average Delivery Rating, and Complaint Count by Dealer.
+    Filters can be applied by region, country, and dealer name.
+    """
+    query = db.query(AutoMobileData)
+
+    # Apply filters
+    if region:
+        query = query.filter(AutoMobileData.region.ilike(f"%{region}%"))
+    if country:
+        query = query.filter(AutoMobileData.country.ilike(f"%{country}%"))
+    if dealer_name:
+        query = query.filter(AutoMobileData.dealer_name.ilike(f"%{dealer_name}%"))
+
+    all_data = query.all()
+
+    # Convert SQLAlchemy objects to dictionaries for easier processing
+    rows = [{c.name: getattr(row, c.name) for c in row.__table__.columns} for row in all_data]
+
+    delivery_delays = defaultdict(list)
+    dealer_ratings = defaultdict(list)
+    dealer_complaints = defaultdict(int)
+
+    for r in rows:
+        booking_date = r.get("booking_date")
+        delivery_date = r.get("delivery_date")
+        dealer = r.get("dealer_name")
+        delivery_rating = r.get("delivery_rating_15")
+        complaint_registered = r.get("complaint_registered_yn", "").lower()
+
+        # Calculate average delivery time
+        if booking_date and delivery_date and isinstance(booking_date, datetime) and isinstance(delivery_date, datetime):
+            delay = (delivery_date - booking_date).days
+            # Group by OEM for delivery delay, as per the existing chart logic, but adaptable to region/country
+            # For this endpoint, we'll just average across all filtered data, or group by dealer if needed.
+            delivery_delays["overall"].append(delay) # Or group by region/country if desired
+
+        # Calculate average delivery rating and complaint count by dealer
+        if dealer:
+            if delivery_rating is not None:
+                dealer_ratings[dealer].append(delivery_rating)
+            if complaint_registered == "yes":
+                dealer_complaints[dealer] += 1
+
+    avg_delivery_time_days = round(sum(delivery_delays["overall"]) / len(delivery_delays["overall"]), 2) if delivery_delays["overall"] else 0
+    avg_delivery_rating_by_dealer = []
+    for dealer, ratings in dealer_ratings.items():
+        if ratings:
+            avg_delivery_rating_by_dealer.append({
+                "dealer_name": dealer,
+                "avg_rating": round(sum(ratings) / len(ratings), 2)
+            })
+
+    complaint_count_by_dealer = []
+    for dealer, count in dealer_complaints.items():
+        complaint_count_by_dealer.append({
+            "dealer_name": dealer,
+            "complaint_count": count
+        })
+
+    return {
+        "average_delivery_time_days": {
+            "type": "value",
+            "title": "Average Delivery Time (Days)",
+            "value": avg_delivery_time_days
+        },
+        "average_delivery_rating_by_dealer": {
+            "type": "bar",
+            "title": "Average Delivery Rating by Dealer",
+            "x": "dealer_name",
+            "y": "avg_rating",
+            "data": avg_delivery_rating_by_dealer
+        },
+        "complaint_count_by_dealer": {
+            "type": "bar",
+            "title": "Complaint Count by Dealer",
+            "x": "dealer_name",
+            "y": "complaint_count",
+            "data": complaint_count_by_dealer
+        }
+    }
+
+# @router.get("/customer-sustainability-kpis", response_model=Dict[str, Any])
+async def get_customer_sustainability_kpis(
+    db: Session = Depends(get_db),
+    city: Optional[str] = None,
+    customer_type: Optional[str] = None
+):
+    """
+    Provides key performance indicators for Customer & Market Insights and Sustainability & Regulatory Compliance.
+    Includes Average NPS by City, Electric Vehicle Share, EV Metrics, and Finance Opted Ratio by Customer Type.
+    Filters can be applied by city and customer type.
+    """
+    query = db.query(AutoMobileData)
+
+    # Apply filters
+    if city:
+        query = query.filter(AutoMobileData.city.ilike(f"%{city}%"))
+    if customer_type:
+        query = query.filter(AutoMobileData.customer_type.ilike(f"%{customer_type}%"))
+
+    all_data = query.all()
+
+    # Convert SQLAlchemy objects to dictionaries for easier processing
+    rows = [
+        {
+        k: v
+        for k, v in row.__dict__.items()
+        if not k.startswith("_sa_instance_state")
+        }
+        for row in all_data
+    ]
+
+    nps_by_city_scores = defaultdict(list)
+    electric_vehicle_units = 0
+    total_units_overall = 0
+    ev_metrics_data = defaultdict(lambda: defaultdict(list))
+    finance_opted_counts = defaultdict(lambda: {"yes": 0, "total": 0})
+
+    for r in rows:
+        nps = r.get("nps_customer_feedback")
+        city_name = r.get("city")
+        fuel_type = r.get("fuel_type", "").lower()
+        units = r.get("units_sold", 0)
+        range_km = r.get("range_km")
+        battery_kwh = r.get("battery_capacity_kwh")
+        charging_time_hours = r.get("charging_time_hours")
         cust_type = r.get("customer_type")
-        finance_yn = r.get("finance_opted_yesno")
+        finance_opted_yn = r.get("finance_opted_yesno", "").lower()
+
+        # NPS by City
+        if city_name and nps is not None:
+            nps_by_city_scores[city_name].append(nps)
+
+        # Electric Vehicle Share
+        total_units_overall += units
+        if "electric" in fuel_type:
+            electric_vehicle_units += units
+            # EV Metrics
+            oem = r.get("oem_name")
+            if oem:
+                if range_km is not None:
+                    ev_metrics_data[oem]["range_km"].append(range_km)
+                if battery_kwh is not None:
+                    ev_metrics_data[oem]["battery_kwh"].append(battery_kwh)
+                if charging_time_hours is not None:
+                    ev_metrics_data[oem]["charging_time_hours"].append(charging_time_hours)
+
+        # Finance Opted Ratio by Customer Type
         if cust_type:
-            finance_by_cust[cust_type]["total"] += 1
-            if finance_yn and finance_yn.lower() == "yes":
-                finance_by_cust[cust_type]["finance_yes"] += 1
+            finance_opted_counts[cust_type]["total"] += 1
+            if finance_opted_yn == "yes":
+                finance_opted_counts[cust_type]["yes"] += 1
 
-    # 1. Monthly sales by OEM (x: months, y: sales per OEM)
-    months = sorted(monthly_sales.keys())
-    oems = sorted({oem for v in monthly_sales.values() for oem in v})
-    monthly_sales_data = []
-    for i, month in enumerate(months):
-        row = {"month": month}
-        for j, oem in enumerate(oems):
-            row[oem] = monthly_sales[month].get(oem, 0)
-        monthly_sales_data.append(row)
-    chart1 = {
-        "id": "monthly_sales_by_oem",
-        "xKey": "month",
-        "x-axis": oems,
-        "y-axis": monthly_sales_data
-    }
-
-    # 2. Units vs Final Price by region (x: region, y1: avg units, y2: avg price)
-    regions = sorted(units_vs_price.keys())
-    units = []
-    prices = []
-    units_vs_price_data = []
-    for region in regions:
-        region_data = units_vs_price[region]
-        avg_units = sum(d["units_sold"] for d in region_data) / len(region_data) if region_data else 0
-        avg_price = sum(d["final_price"] for d in region_data) / len(region_data) if region_data else 0
-        units_vs_price_data.append({
-            "region": region,
-            "avg_units_sold": avg_units,
-            "avg_final_price": avg_price
-        })
-    chart2 = {
-        "id": "units_vs_price_by_region",
-        "xKey": "region",
-        "x-axis": ["avg_units_sold", "avg_final_price"],
-        "y-axis": units_vs_price_data
-    }
-
-    # 3. NPS by city (x: city, y: avg NPS)
-    nps_by_city_data = []
-    for city, vals in city_scores.items():
-        if len(vals) >= 3:
-            nps_by_city_data.append({
-                "city": city,
-                "avg_nps": sum(vals) / len(vals)
+    # Calculate Average NPS by City
+    avg_nps_by_city = []
+    for city_name, scores in nps_by_city_scores.items():
+        if scores:
+            avg_nps_by_city.append({
+                "city": city_name,
+                "average_nps": round(sum(scores) / len(scores), 2)
             })
-    chart3 = {
-        "id": "nps_by_city",
-        "xKey": "city",
-        "x-axis": ["avg_nps"],
-        "y-axis": nps_by_city_data
-    }
 
-    # 4. Fuel vs transmission (x: fuel_type, y: units per transmission type)
-    fuel_types = sorted(fuel_trans.keys())
-    transmissions = sorted({tt for v in fuel_trans.values() for tt in v})
-    fuel_vs_trans_data = []
-    for ft in fuel_types:
-        row = {"fuel_type": ft}
-        for tt in transmissions:
-            row[tt] = fuel_trans[ft].get(tt, 0)
-        fuel_vs_trans_data.append(row)
-    chart4 = {
-        "id": "fuel_vs_transmission",
-        "xKey": "fuel_type",
-        "x-axis": transmissions,
-        "y-axis": fuel_vs_trans_data
-    }
+    # Calculate Electric Vehicle Share %
+    ev_share_percent = round((electric_vehicle_units / total_units_overall * 100), 2) if total_units_overall > 0 else 0.0
 
-    # 5. Statewise units & avg market share (x: state, y1: units, y2: avg market share)
-    statewise_data = []
-    for st, d in state_acc.items():
-        if d["count"] > 0:
-            statewise_data.append({
-                "state": st,
-                "units_sold": d["units"],
-                "avg_market_share": d["mkt_total"] / d["count"]
-            })
-    chart5 = {
-        "id": "statewise_units_market_share",
-        "xKey": "state",
-        "x-axis": ["units_sold", "avg_market_share"],
-        "y-axis": statewise_data
-    }
-
-    # 6. Delivery delay by OEM (x: oem, y: avg delay)
-    delivery_delay_data = []
-    for oem, L in delays.items():
-        if L:
-            delivery_delay_data.append({
-                "oem": oem,
-                "avg_delivery_delay_days": sum(L) / len(L)
-            })
-    chart6 = {
-        "id": "delivery_delay_by_oem",
-        "xKey": "oem",
-        "x-axis": ["avg_delivery_delay_days"],
-        "y-axis": delivery_delay_data
-    }
-
-    # 7. Discount vs units by customer type (x: customer_type, y1: avg discount, y2: avg units)
-    discount_vs_units_data = []
-    for ct, vals in disc_vs_units.items():
-        if vals:
-            discount_vs_units_data.append({
-                "customer_type": ct,
-                "avg_discount": sum(d["discount"] for d in vals) / len(vals),
-                "avg_units_sold": sum(d["units_sold"] for d in vals) / len(vals)
-            })
-    chart7 = {
-        "id": "discount_vs_units_by_customer",
-        "xKey": "customer_type",
-        "x-axis": ["avg_discount", "avg_units_sold"],
-        "y-a": discount_vs_units_data
-    }
-
-    # 8. Rating vs complaints by dealer (x: dealer, y1: avg rating, y2: complaint count)
-    rating_vs_complaints_data = []
-    for dlr, info in dr_complaints.items():
-        if info["ratings"]:
-            rating_vs_complaints_data.append({
-                "dealer": dlr,
-                "avg_rating": sum(info["ratings"]) / len(info["ratings"]),
-                "complaint_count": info["complaints"]
-            })
-    chart8 = {
-        "id": "rating_vs_complaints_by_dealer",
-        "xKey": "dealer",
-        "x-axis": ["avg_rating", "complaint_count"],
-        "y-axis": rating_vs_complaints_data
-    }
-
-    # 9. Competitor vs final price (x: oem, y1: competitor price, y2: final price)
-    competitor_vs_final_data = []
-    for item in comp_vs_final:
-        competitor_vs_final_data.append({
-            "oem": item["oem"],
-            "competitor_price": item["competitor_price"],
-            "final_price": item["final_price"]
-        })
-    chart9 = {
-        "id": "competitor_vs_final_price",
-        "xKey": "oem",
-        "x-axis": ["competitor_price", "final_price"],
-        "y-axis": competitor_vs_final_data
-    }
-
-    # 10. EV metrics (x: oem, y1: range, y2: battery, y3: charging time)
-    ev_metrics_data = []
-    for item in ev_metrics:
-        ev_metrics_data.append({
-            "oem": item["oem"],
-            "range_km": item["range_km"],
-            "battery_kwh": item["battery_kwh"],
-            "charging_time_hr": item["charging_time_hr"]
-        })
-    chart10 = {
-        "id": "ev_range_vs_battery_vs_charging",
-        "xKey": "oem",
-        "x-axis": ["range_km", "battery_kwh", "charging_time_hr"],
-        "y-axis": ev_metrics_data
-    }
-
-    # 11. Market share by OEM (brand)
-    total_units = sum(oem_units.values())
-    market_share_oem = []
-    for oem, units in sorted(oem_units.items(), key=lambda x: x[1], reverse=True):
-        market_share_oem.append({
+    # Calculate Average EV Metrics
+    avg_ev_metrics = []
+    for oem, metrics in ev_metrics_data.items():
+        avg_ev_metrics.append({
             "oem": oem,
-            "units_sold": units,
-            "market_share_percent": (units / total_units * 100) if total_units else 0
+            "avg_range_km": round(sum(metrics["range_km"]) / len(metrics["range_km"]), 2) if metrics["range_km"] else 0,
+            "avg_battery_kwh": round(sum(metrics["battery_kwh"]) / len(metrics["battery_kwh"]), 2) if metrics["battery_kwh"] else 0,
+            "avg_charging_time_hours": round(sum(metrics["charging_time_hours"]) / len(metrics["charging_time_hours"]), 2) if metrics["charging_time_hours"] else 0
         })
-    chart11 = {
-        "id": "market_share_by_oem",
-        "xKey": "oem",
-        "x-axis": ["units_sold", "market_share_percent"],
-        "y-axis": market_share_oem
-    }
 
-    # 12. Market share by competitor_oem (company)
-    total_comp_units = sum(competitor_units.values())
-    market_share_comp = []
-    for comp, units in sorted(competitor_units.items(), key=lambda x: x[1], reverse=True):
-        market_share_comp.append({
-            "competitor_oem": comp,
-            "units_sold": units,
-            "market_share_percent": (units / total_comp_units * 100) if total_comp_units else 0
-        })
-    chart12 = {
-        "id": "market_share_by_competitor_oem",
-        "xKey": "competitor_oem",
-        "x-axis": ["units_sold", "market_share_percent"],
-        "y-axis": market_share_comp
-    }
-
-    # 13. Top selling models
-    top_models = sorted(model_units.items(), key=lambda x: x[1], reverse=True)[:10]
-    top_models_data = [{"model": m, "units_sold": u} for m, u in top_models]
-    chart13 = {
-        "id": "top_selling_models",
-        "xKey": "model",
-        "x-axis": ["units_sold"],
-        "y-axis": top_models_data
-    }
-
-    # 14. Average discount by brand
-    avg_discount_data = []
-    for oem, discounts in brand_discount.items():
-        if discounts:
-            avg_discount_data.append({
-                "oem": oem,
-                "avg_discount": sum(discounts) / len(discounts)
-            })
-    chart14 = {
-        "id": "avg_discount_by_brand",
-        "xKey": "oem",
-        "x-axis": ["avg_discount"],
-        "y-axis": avg_discount_data
-    }
-
-    # 15. Sales trend by vehicle segment
-    segment_trend_data = []
-    all_months = sorted({m for seg in segment_trend.values() for m in seg})
-    for segment, month_units in segment_trend.items():
-        row = {"vehicle_segment": segment}
-        for m in all_months:
-            row[m] = month_units.get(m, 0)
-        segment_trend_data.append(row)
-    chart15 = {
-        "id": "sales_trend_by_vehicle_segment",
-        "xKey": "vehicle_segment",
-        "x-axis": all_months,
-        "y-axis": segment_trend_data
-    }
-
-    # 16. Finance opted ratio by customer type
-    finance_ratio_data = []
-    for cust_type, d in finance_by_cust.items():
-        total = d["total"]
-        yes = d["finance_yes"]
-        ratio = (yes / total * 100) if total else 0
-        finance_ratio_data.append({
+    # Calculate Finance Opted Ratio by Customer Type
+    finance_opted_ratio_by_customer_type = []
+    for cust_type, counts in finance_opted_counts.items():
+        total = counts["total"]
+        yes = counts["yes"]
+        ratio = round((yes / total * 100), 2) if total > 0 else 0.0
+        finance_opted_ratio_by_customer_type.append({
             "customer_type": cust_type,
             "finance_opted_percent": ratio
         })
-    chart16 = {
-        "id": "finance_opted_ratio_by_customer_type",
-        "xKey": "customer_type",
-        "x-axis": ["finance_opted_percent"],
-        "y-axis": finance_ratio_data
+
+    return {
+        "average_nps_by_city": {
+            "type": "bar",
+            "title": "Average NPS by City",
+            "x": "city",
+            "y": "average_nps",
+            "data": avg_nps_by_city
+        },
+        "electric_vehicle_share_percent": {
+            "type": "value",
+            "title": "Electric Vehicle Share (%)",
+            "value": ev_share_percent
+        },
+        "average_ev_metrics_by_oem": {
+            "type": "bar",
+            "title": "Average EV Metrics by OEM",
+            "x": "oem",
+            "y": ["avg_range_km", "avg_battery_kwh", "avg_charging_time_hours"],
+            "data": avg_ev_metrics
+        },
+        "finance_opted_ratio_by_customer_type": {
+            "type": "bar",
+            "title": "Finance Opted Ratio by Customer Type",
+            "x": "customer_type",
+            "y": "finance_opted_percent",
+            "data": finance_opted_ratio_by_customer_type
+        }
     }
 
-    return [
-        chart1,
-        chart2,
-        chart3,
-        chart4,
-        chart5,
-        chart6,
-        chart7,
-        chart8,
-        chart9,
-        chart10,
-        chart11,
-        chart12,
-        chart13,
-        chart14,
-        chart15,
-        chart16
-    ]
+@router.get("/dashboard-tabs/")
+async def get_dashboard_tabs(dashboard_id: str):
+    """
+    Returns the list of available tabs for a given dashboard.
+    For 'auto_mobile_data', returns ['sales', 'supply', 'customer'].
+    """
+    if dashboard_id == "auto_mobile":
+        return {"tabs": ["sales", "supply", "customer"]}
+    # Add more dashboard_id checks as you add more dashboards
+    return {"tabs": []}
+
+@router.get("/dashboard-tab-kpis/{dashboard_id}/{tab}")
+async def dashboard_tab_kpis_dynamic(
+    dashboard_id: str,
+    tab: str,
+    db: Session = Depends(get_db),
+    # Optional filters
+    country: Optional[str] = None,
+    region: Optional[str] = None,
+    oem_name: Optional[str] = None,
+    dealer_name: Optional[str] = None,
+    city: Optional[str] = None,
+    customer_type: Optional[str] = None,
+):
+    """
+    Dynamic endpoint: /dashboard-tab-kpis/{dashboard_id}/{tab}
+    Example: /dashboard-tab-kpis/auto_mobile_data/sales
+    """
+    # Example for auto_mobile_data dashboard
+    if dashboard_id == "auto_mobile":
+        if tab == "sales":
+            return await get_sales_performance_kpis(
+                db=db, country=country, region=region, oem_name=oem_name
+            )
+        elif tab == "supply":
+            return await get_supply_aftersales_kpis(
+                db=db, region=region, country=country, dealer_name=dealer_name
+            )
+        elif tab == "customer":
+            return await get_customer_sustainability_kpis(
+                db=db, city=city, customer_type=customer_type
+            )
+        elif tab == "descriptive":
+            return await descriptive_data_api(
+                db=db, country=country, brand=oem_name
+            )
+        else:
+            raise HTTPException(404, "Tab not found for this dashboard.")
+    # Add more dashboard_id logic here for other dashboards if needed
+    else:
+        raise HTTPException(404, "Dashboard not found or not supported.")
