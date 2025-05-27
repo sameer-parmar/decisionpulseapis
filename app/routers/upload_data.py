@@ -544,7 +544,7 @@ async def get_dashboard_tabs(dashboard_id: str):
     For 'auto_mobile_data', returns ['sales', 'supply', 'customer'].
     """
     if dashboard_id == "auto_mobile":
-        return {"tabs": ["sales", "supply", "customer"]}
+        return {"tabs": ["sales", "supply", "customer","descriptive"]}
     # Add more dashboard_id checks as you add more dashboards
     return {"tabs": []}
 
