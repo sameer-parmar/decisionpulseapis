@@ -10,5 +10,5 @@ from app.routers.fmcgrouters import router as fmcg_router
 app = FastAPI()
 
 
-app.include_router(shared_dashboard_router, prefix="/shared-dashboard", tags=["Shared Dashboard"])
+app.include_router(shared_dashboard_router, tags=["Shared Dashboard"])
 app.include_router(upload_data_router, prefix="/upload-data", tags=["Upload Data"])
