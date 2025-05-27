@@ -263,34 +263,42 @@ async def get_sales_performance_kpis(
     # Calculate Average Selling Price (ASP)
     average_selling_price = total_revenue / total_units_sold if total_units_sold > 0 else 0.0
 
-    return {
-        "total_units_sold": {
-            "type": "bar",
-            "title": "Total Units Sold by OEM",
-            "x": "oem",
-            "y": "units_sold",
-            "data": [{"oem": oem, "units_sold": units} for oem, units in oem_units_sold.items()]
-        },
-        "average_selling_price": {
-            "type": "value",
-            "title": "Average Selling Price",
-            "value": round(average_selling_price, 2)
-        },
-        "market_share_by_oem": {
-            "type": "bar",
-            "title": "Market Share by OEM",
-            "x": "oem",
-            "y": "market_share_percent",
-            "data": market_share_by_oem
-        },
-        "market_share_by_competitor_oem": {
-            "type": "bar",
-            "title": "Market Share by Competitor OEM",
-            "x": "competitor_oem",
-            "y": "market_share_percent",
-            "data": market_share_by_competitor_oem
-        }
-    }
+    # Prepare data for charts
+    charts = []
+
+    # Total Units Sold by OEM
+    charts.append({
+        "id": "total_units_sold_by_oem",
+        "xKey": "oem",
+        "x-axis": ["units_sold"],
+        "y-axis": [{"oem": oem, "units_sold": units} for oem, units in oem_units_sold.items()]
+    })
+
+    # Average Selling Price (single value as a chart)
+    charts.append({
+        "id": "average_selling_price",
+        "xKey": "average_selling_price",
+        "x-axis": ["average_selling_price"],
+        "y-axis": [{"average_selling_price": round(average_selling_price, 2)}]
+    })
+
+    # Market Share by OEM
+    charts.append({
+        "id": "market_share_by_oem",
+        "xKey": "oem",
+        "x-axis": ["market_share_percent"],
+        "y-axis": market_share_by_oem
+    })
+
+    # Market Share by Competitor OEM
+    charts.append({
+        "id": "market_share_by_competitor_oem",
+        "xKey": "competitor_oem",
+        "x-axis": ["market_share_percent"],
+        "y-axis": market_share_by_competitor_oem
+    })
+
+    return charts
 
 # @router.get("/supply-aftersales-kpis", response_model=Dict[str, Any])
 async def get_supply_aftersales_kpis(
@@ -360,27 +368,33 @@ async def get_supply_aftersales_kpis(
             "complaint_count": count
         })
 
-    return {
-        "average_delivery_time_days": {
-            "type": "value",
-            "title": "Average Delivery Time (Days)",
-            "value": avg_delivery_time_days
-        },
-        "average_delivery_rating_by_dealer": {
-            "type": "bar",
-            "title": "Average Delivery Rating by Dealer",
-            "x": "dealer_name",
-            "y": "avg_rating",
-            "data": avg_delivery_rating_by_dealer
-        },
-        "complaint_count_by_dealer": {
-            "type": "bar",
-            "title": "Complaint Count by Dealer",
-            "x": "dealer_name",
-            "y": "complaint_count",
-            "data": complaint_count_by_dealer
-        }
-    }
+    charts = []
+
+    # Average Delivery Time
+    charts.append({
+        "id": "average_delivery_time_days",
+        "xKey": "average_delivery_time_days",
+        "x-axis": ["average_delivery_time_days"],
+        "y-axis": [{"average_delivery_time_days": avg_delivery_time_days}]
+    })
+
+    # Average Delivery Rating by Dealer
+    charts.append({
+        "id": "average_delivery_rating_by_dealer",
+        "xKey": "dealer_name",
+        "x-axis": ["avg_rating"],
+        "y-axis": avg_delivery_rating_by_dealer
+    })
+
+    # Complaint Count by Dealer
+    charts.append({
+        "id": "complaint_count_by_dealer",
+        "xKey": "dealer_name",
+        "x-axis": ["complaint_count"],
+        "y-axis": complaint_count_by_dealer
+    })
+
+    return charts
 
 # @router.get("/customer-sustainability-kpis", response_model=Dict[str, Any])
 async def get_customer_sustainability_kpis(
@@ -487,34 +501,41 @@ async def get_customer_sustainability_kpis(
             "finance_opted_percent": ratio
         })
 
-    return {
-        "average_nps_by_city": {
-            "type": "bar",
-            "title": "Average NPS by City",
-            "x": "city",
-            "y": "average_nps",
-            "data": avg_nps_by_city
-        },
-        "electric_vehicle_share_percent": {
-            "type": "value",
-            "title": "Electric Vehicle Share (%)",
-            "value": ev_share_percent
-        },
-        "average_ev_metrics_by_oem": {
-            "type": "bar",
-            "title": "Average EV Metrics by OEM",
-            "x": "oem",
-            "y": ["avg_range_km", "avg_battery_kwh", "avg_charging_time_hours"],
-            "data": avg_ev_metrics
-        },
-        "finance_opted_ratio_by_customer_type": {
-            "type": "bar",
-            "title": "Finance Opted Ratio by Customer Type",
-            "x": "customer_type",
-            "y": "finance_opted_percent",
-            "data": finance_opted_ratio_by_customer_type
-        }
-    }
+    charts = []
+
+    # Average NPS by City
+    charts.append({
+        "id": "average_nps_by_city",
+        "xKey": "city",
+        "x-axis": ["average_nps"],
+        "y-axis": avg_nps_by_city
+    })
+
+    # Electric Vehicle Share Percent
+    charts.append({
+        "id": "electric_vehicle_share_percent",
+        "xKey": "electric_vehicle_share_percent",
+        "x-axis": ["electric_vehicle_share_percent"],
+        "y-axis": [{"electric_vehicle_share_percent": ev_share_percent}]
+    })
+
+    # Average EV Metrics by OEM
+    charts.append({
+        "id": "average_ev_metrics_by_oem",
+        "xKey": "oem",
+        "x-axis": ["avg_range_km", "avg_battery_kwh", "avg_charging_time_hours"],
+        "y-axis": avg_ev_metrics
+    })
+
+    # Finance Opted Ratio by Customer Type
+    charts.append({
+        "id": "finance_opted_ratio_by_customer_type",
+        "xKey": "customer_type",
+        "x-axis": ["finance_opted_percent"],
+        "y-axis": finance_opted_ratio_by_customer_type
+    })
+
+    return charts
 
 @router.get("/dashboard-tabs/")
 async def get_dashboard_tabs(dashboard_id: str):
