@@ -53,12 +53,6 @@ def process_data_dump(file_bytes: bytes, original_filename: str, db_url: str, ta
     ]
 
     # Rename specific columns to match the AutoMobileData model's mapped names
-    df.rename(columns={
-        'market_share_in_region_': 'market_share_in_region',
-        'unit_price_': 'unit_price',
-        'discount_offered_': 'discount_offered',
-        'final_price_after_discount_': 'final_price_after_discount'
-    }, inplace=True)
 
 
     num_cols = len(df.columns)
@@ -87,12 +81,11 @@ def process_data_dump(file_bytes: bytes, original_filename: str, db_url: str, ta
 async def upload_raw_data(
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
-    table_name: str = "auto_mobile_data",
     save_file: Optional[bool] = False
 ):
     """
     Endpoint to upload raw data files (CSV or XLSX) for processing and database dumping.
-    The actual data processing is offloaded to a background task.
+    Automatically generates a safe table name from the uploaded filename.
     """
     if not file.filename:
         raise HTTPException(400, "No file uploaded.")
@@ -101,10 +94,14 @@ async def upload_raw_data(
     if ext not in ('csv', 'xlsx'):
         raise HTTPException(400, "Only .csv or .xlsx supported.")
 
-    # Clean and validate table name to prevent SQL injection or invalid names
-    cleaned_name = re.sub(r'[^a-zA-Z0-9_]', '', table_name.strip().lower())
-    if not re.match(r'^[a-zA-Z_]\w*$', cleaned_name):
-        raise HTTPException(400, "Invalid table name after cleaning.")
+    # Generate safe table name from filename
+    base_name = os.path.splitext(file.filename)[0]  # Remove .csv/.xlsx
+    cleaned_base = re.sub(r'[^a-zA-Z0-9_]', '_', base_name.strip().lower())
+    table_name = f"table_{cleaned_base}"
+
+    # Ensure valid table name format
+    if not re.match(r'^[a-zA-Z_]\w*$', table_name):
+        raise HTTPException(400, f"Invalid generated table name: {table_name}")
 
     raw = await file.read()
     if not raw:
@@ -116,18 +113,18 @@ async def upload_raw_data(
             f.write(raw)
         print(f"Saved to {path}")
 
-    print(f"Scheduling batch dump for '{file.filename}' → '{cleaned_name}'")
+    print(f"Scheduling batch dump for '{file.filename}' → '{table_name}'")
     background_tasks.add_task(
         process_data_dump,
         raw,
         file.filename,
         settings.sqlalchemy_database_uri,
-        cleaned_name
+        table_name
     )
 
     return {
         "message": f"Received '{file.filename}'. Batch processing started.",
-        "table": cleaned_name
+        "table": table_name
     }
 
 # Existing endpoint for descriptive data, kept for context
@@ -537,54 +534,6 @@ async def get_customer_sustainability_kpis(
 
     return charts
 
-@router.get("/dashboard-tabs/")
-async def get_dashboard_tabs(dashboard_id: str):
-    """
-    Returns the list of available tabs for a given dashboard.
-    For 'auto_mobile_data', returns ['sales', 'supply', 'customer'].
-    """
-    if dashboard_id == "auto_mobile":
-        return {"tabs": ["sales", "supply", "customer","descriptive"]}
-    # Add more dashboard_id checks as you add more dashboards
-    return {"tabs": []}
-
-@router.get("/dashboard-tab-kpis/{dashboard_id}/{tab}")
-async def dashboard_tab_kpis_dynamic(
-    dashboard_id: str,
-    tab: str,
-    db: Session = Depends(get_db),
-    # Optional filters
-    country: Optional[str] = None,
-    region: Optional[str] = None,
-    oem_name: Optional[str] = None,
-    dealer_name: Optional[str] = None,
-    city: Optional[str] = None,
-    customer_type: Optional[str] = None,
-):
-    """
-    Dynamic endpoint: /dashboard-tab-kpis/{dashboard_id}/{tab}
-    Example: /dashboard-tab-kpis/auto_mobile_data/sales
-    """
-    # Example for auto_mobile_data dashboard
-    if dashboard_id == "auto_mobile":
-        if tab == "sales":
-            return await get_sales_performance_kpis(
-                db=db, country=country, region=region, oem_name=oem_name
-            )
-        elif tab == "supply":
-            return await get_supply_aftersales_kpis(
-                db=db, region=region, country=country, dealer_name=dealer_name
-            )
-        elif tab == "customer":
-            return await get_customer_sustainability_kpis(
-                db=db, city=city, customer_type=customer_type
-            )
-        elif tab == "descriptive":
-            return await descriptive_data_api(
-                db=db, country=country, brand=oem_name
-            )
-        else:
-            raise HTTPException(404, "Tab not found for this dashboard.")
-    # Add more dashboard_id logic here for other dashboards if needed
-    else:
-        raise HTTPException(404, "Dashboard not found or not supported.")
+# The following endpoints have been moved to shared_dashboard.py:
+# - /dashboard-tabs/
+# - /dashboard-tab-kpis/{dashboard_id}/{tab}
