@@ -183,84 +183,48 @@ async def get_sales_performance_kpis(
     region: Optional[str] = None,
     oem_name: Optional[str] = None
 ):
-    """
-    Provides key performance indicators for Global & Regional Sales Performance.
-    Includes Total Units Sold, Market Share by OEM and Competitor, Average Selling Price,
-    and Year-over-Year (YoY) Units Sold.
-    Filters can be applied by country, region, and OEM name.
-    """
-    # Fetch all data from the AutoMobileData model
     query = db.query(AutoMobileData)
-
-    # Apply filters based on query parameters
     if country:
         query = query.filter(AutoMobileData.country.ilike(f"%{country}%"))
     if region:
         query = query.filter(AutoMobileData.region.ilike(f"%{region}%"))
     if oem_name:
         query = query.filter(AutoMobileData.oem_name.ilike(f"%{oem_name}%"))
-
     all_data = query.all()
-
-    # Convert SQLAlchemy objects to dictionaries for easier processing
-    rows = []
-    for row in all_data:
-        row_dict = {
+    rows = [
+        {
             k: v
             for k, v in row.__dict__.items()
             if not k.startswith("_sa_instance_state")
         }
-        rows.append(row_dict)
+        for row in all_data
+    ]
 
     total_units_sold = 0
     total_revenue = 0
     oem_units_sold = defaultdict(int)
     competitor_units_sold = defaultdict(int)
-    sales_by_year = defaultdict(int)  # For YoY chart
-
-    # New: YoY by OEM and by Competitor OEM
-    sales_by_year_oem = defaultdict(lambda: defaultdict(int))  # {oem: {year: units}}
-    sales_by_year_competitor = defaultdict(lambda: defaultdict(int))  # {competitor: {year: units}}
-
-    # Add these lines to fix the NameError
-    sales_by_year_status = defaultdict(lambda: defaultdict(int))  # {status: {year: units}}
-    sales_by_year_channel = defaultdict(lambda: defaultdict(int))  # {channel: {year: units}}
-
-    # Helper functions for new columns
-    def infer_customer_status(r):
-        # If exchange_vehicle_offered is "Yes", treat as Returning, else New
-        val = str(r.get("exchange_vehicle_offered", "")).strip().lower()
-        if val == "yes":
-            return "Returning"
-        elif val == "no":
-            return "New"
-        return ""
-
-    def infer_channel(r):
-        cust_type = str(r.get("customer_type", "")).strip().lower()
-        lead_source = str(r.get("lead_source", "")).strip().lower()
-        # Fleet channel
-        if cust_type == "fleet":
-            return "Fleet"
-        # Online channel
-        if lead_source in {"digital", "website", "online"}:
-            return "Online"
-        # Default to Dealership
-        return "Dealership"
+    sales_by_year = defaultdict(int)
+    customer_type_sales = defaultdict(int)
+    channel_sales = defaultdict(int)
+    asp_by_segment = defaultdict(lambda: {"total_price": 0, "units": 0})
+    sales_by_month_year = defaultdict(int)  # Initialize here
+    sales_by_oem_year_month = defaultdict(lambda: defaultdict(int)) # Initialize here
 
     for r in rows:
         units = r.get("units_sold", 0)
-        if units is None: units = 0
-
         final_price_str = r.get("final_price_after_discount")
         try:
             final_price = float(final_price_str) if final_price_str is not None else 0.0
         except (ValueError, TypeError):
             final_price = 0.0
-
         oem = r.get("oem_name")
         competitor = r.get("competitor_oem")
         sale_date_str = r.get("sale_date")
+        vehicle_segment = r.get("vehicle_segment")
+        exchange_offered = str(r.get("exchange_vehicle_offered", "")).strip().lower()
+        lead_source = str(r.get("lead_source", "")).strip().lower()
+        cust_type_raw = str(r.get("customer_type", "")).strip().lower()
 
         total_units_sold += units
         total_revenue += (final_price * units)
@@ -270,25 +234,43 @@ async def get_sales_performance_kpis(
         if competitor:
             competitor_units_sold[competitor] += units
 
-        # Process sale_date for YoY aggregation
-        sale_year = None
         if sale_date_str:
             try:
                 if isinstance(sale_date_str, str):
-                    sale_year = datetime.strptime(sale_date_str.split(" ")[0], "%Y-%m-%d").year
+                    date_obj = datetime.strptime(sale_date_str.split(" ")[0], "%Y-%m-%d")
                 elif isinstance(sale_date_str, datetime):
-                    sale_year = sale_date_str.year
+                    date_obj = sale_date_str
+                else:
+                    date_obj = None  # Handle cases where it's not a string or datetime
+
+                if date_obj:
+                    sale_year = date_obj.year
+                    sales_by_year[sale_year] += units
+
+                    month_year = date_obj.strftime("%Y-%m")
+                    sales_by_month_year[month_year] += units
+                    if oem:
+                        sales_by_oem_year_month[oem][month_year] += units
+
             except ValueError:
-                sale_year = None
+                pass
 
-        if sale_year:
-            sales_by_year[sale_year] += units
-            if oem:
-                sales_by_year_oem[oem][sale_year] += units
-            if competitor:
-                sales_by_year_competitor[competitor][sale_year] += units
+        if exchange_offered == "yes":
+            customer_type_sales["returning"] += units
+        elif exchange_offered == "no":
+            customer_type_sales["new"] += units
 
-    # Calculate Market Share for OEMs
+        if cust_type_raw == "fleet":
+            channel_sales["fleet"] += units
+        elif lead_source in {"digital", "website", "online"}:
+            channel_sales["online"] += units
+        else:
+            channel_sales["dealership"] += units
+
+        if vehicle_segment:
+            asp_by_segment[vehicle_segment]["total_price"] += final_price * units
+            asp_by_segment[vehicle_segment]["units"] += units
+
     market_share_by_oem = []
     if total_units_sold > 0:
         for oem, units in oem_units_sold.items():
@@ -299,7 +281,6 @@ async def get_sales_performance_kpis(
             })
     market_share_by_oem = sorted(market_share_by_oem, key=lambda x: x["market_share_percent"], reverse=True)
 
-    # Calculate Market Share for Competitor OEMs
     total_competitor_units_sold = sum(competitor_units_sold.values())
     market_share_by_competitor_oem = []
     if total_competitor_units_sold > 0:
@@ -311,149 +292,87 @@ async def get_sales_performance_kpis(
             })
     market_share_by_competitor_oem = sorted(market_share_by_competitor_oem, key=lambda x: x["market_share_percent"], reverse=True)
 
-    # Calculate Average Selling Price (ASP)
     average_selling_price = total_revenue / total_units_sold if total_units_sold > 0 else 0.0
+    asp_by_segment_data = []
+    for segment, data in asp_by_segment.items():
+        avg_price = data["total_price"] / data["units"] if data["units"] > 0 else 0.0
+        asp_by_segment_data.append({"segment": segment, "average_price": round(avg_price, 2)})
 
-    # Prepare data for charts
-    charts = []
+    charts = [
+        {"id": "total_units_sold", "xKey": "total_units_sold", "x-axis": ["value"], "y-axis": [{"metric": "Total Units Sold", "value": total_units_sold}]},
+        {"id": "average_selling_price", "xKey": "average_selling_price", "x-axis": ["value"], "y-axis": [{"metric": "Average Selling Price", "value": round(average_selling_price, 2)}]},
+        {"id": "market_share_by_oem", "xKey": "oem", "x-axis": ["market_share_percent"], "y-axis": market_share_by_oem},
+        {"id": "market_share_by_competitor_oem", "xKey": "competitor_oem", "x-axis": ["market_share_percent"], "y-axis": market_share_by_competitor_oem},
+        {"id": "yoy_sales_units", "xKey": "year", "x-axis": ["units"], "y-axis": [{"year": str(k), "units": v} for k, v in sales_by_year.items()]},
+        {"id": "customer_type_sales", "xKey": "customer_type", "x-axis": ["units_sold"], "y-axis": [{"customer_type": k, "units_sold": v} for k, v in customer_type_sales.items()]},
+        {"id": "channel_sales", "xKey": "channel", "x-axis": ["units_sold"], "y-axis": [{"channel": k, "units_sold": v} for k, v in channel_sales.items()]},
+        {"id": "asp_by_vehicle_segment", "xKey": "segment", "x-axis": ["average_price"], "y-axis": asp_by_segment_data},
+    ]
 
-    # Total Units Sold by OEM
-    if oem_units_sold:
-        charts.append({
-            "id": "total_units_sold_by_oem",
-            "xKey": "oem",
-            "x-axis": ["units_sold"],
-            "y-axis": [
-                {
-                    "oem": oem,
-                    "units_sold": units,
-                    # Optionally, could aggregate by status/channel here as well
-                }
-                for oem, units in oem_units_sold.items()
-            ]
-        })
+    # 1. YoY Sales Growth % (using sale_date)
+    sales_by_month_year_data = defaultdict(int) # Redundant, using the one initialized at the top
+    for r in rows:
+        if r.get("sale_date"):
+            try:
+                if isinstance(r["sale_date"], str):
+                    date_obj = datetime.strptime(r["sale_date"].split(" ")[0], "%Y-%m-%d")
+                elif isinstance(r["sale_date"], datetime):
+                    date_obj = r["sale_date"]
+                else:
+                    date_obj = None
 
-    # Average Selling Price (single value as a chart)
-    charts.append({
-        "id": "average_selling_price",
-        "xKey": "average_selling_price", # For a single value, this might be displayed differently by UI
-        "x-axis": ["value"],
-        "y-axis": [{"metric_name": "Average Selling Price", "value": round(average_selling_price, 2)}]
-    })
+                if date_obj:
+                    month_year = date_obj.strftime("%Y-%m")
+                    sales_by_month_year[month_year] += r.get("units_sold", 0)
+            except ValueError:
+                pass
 
-    # Market Share by OEM
-    if market_share_by_oem:
-        charts.append({
-            "id": "market_share_by_oem",
-            "xKey": "oem",
-            "x-axis": ["market_share_percent"],
-            "y-axis": market_share_by_oem
-        })
+    sorted_month_years = sorted(sales_by_month_year.keys())
+    yoy_growth_data = []
+    if len(sorted_month_years) > 12: # Need at least two years of data for YoY comparison
+        for i in range(12, len(sorted_month_years)):
+            prev_year_month = sorted_month_years[i-12]
+            current_year_month = sorted_month_years[i]
+            prev_sales = sales_by_month_year.get(prev_year_month, 0)
+            current_sales = sales_by_month_year.get(current_year_month, 0)
+            growth_percent = round(((current_sales - prev_sales) / prev_sales) * 100, 2) if prev_sales else 0.0
+            year = current_year_month[:4]
+            month = current_year_month[5:]
+            yoy_growth_data.append({"period": f"{year}-{month}", "growth_percent": growth_percent})
 
-    # Market Share by Competitor OEM
-    if market_share_by_competitor_oem:
-        charts.append({
-            "id": "market_share_by_competitor_oem",
-            "xKey": "competitor_oem",
-            "x-axis": ["market_share_percent"],
-            "y-axis": market_share_by_competitor_oem
-        })
+    if yoy_growth_data:
+        charts.append({"id": "yoy_sales_growth_percent", "xKey": "period", "x-axis": ["growth_percent"], "y-axis": yoy_growth_data})
 
-    # YoY Sales Performance (Units Sold by Year, overall)
-    # REMOVE all other YoY charts, only keep the percentage chart
+    # 2. Channel-wise Sales Breakdown (using channel_sales)
+    if channel_sales:
+        charts.append({"id": "channel_contribution", "xKey": "channel", "x-axis": ["units_sold"], "y-axis": [{"channel": k, "units_sold": v} for k, v in channel_sales.items()]})
 
-    # --- Comprehensive YoY Sales Units Chart (Single Chart, Multiple Series) ---
-    comprehensive_yoy_data_points = []
-    comprehensive_yoy_series_keys = set()
-    
-    all_years_in_data = set(sales_by_year.keys())
-    for data_map in [sales_by_year_oem, sales_by_year_competitor, sales_by_year_status, sales_by_year_channel]:
-        for year_data_map in data_map.values():
-            all_years_in_data.update(year_data_map.keys())
-    
-    sorted_unique_years = sorted(list(all_years_in_data))
+    # 3. Sales by OEM over time (using sale_date and oem_name)
+    sales_by_oem_year_month_data = defaultdict(lambda: defaultdict(int)) # Redundant, using the one initialized at the top
+    for r in rows:
+        if r.get("sale_date") and r.get("oem_name"):
+            try:
+                if isinstance(r["sale_date"], str):
+                    date_obj = datetime.strptime(r["sale_date"].split(" ")[0], "%Y-%m-%d")
+                elif isinstance(r["sale_date"], datetime):
+                    date_obj = r["sale_date"]
+                else:
+                    date_obj = None
 
-    if sorted_unique_years:
-        # Define series keys that will appear in the chart
-        if sales_by_year:  # Only add if there's data
-            comprehensive_yoy_series_keys.add("Overall Sales")
-        
-        active_oems = {oem for oem, data in sales_by_year_oem.items() if data}
-        for oem_name_key in active_oems: comprehensive_yoy_series_keys.add(f"OEM: {oem_name_key}")
-        
-       
-        active_statuses = {s for s, data in sales_by_year_status.items() if data}
-        for status_name_key in active_statuses: comprehensive_yoy_series_keys.add(f"Status: {status_name_key}")
-        
-        active_channels = {c for c, data in sales_by_year_channel.items() if data}
-        for channel_name_key in active_channels: comprehensive_yoy_series_keys.add(f"Channel: {channel_name_key}")
+                if date_obj:
+                    month_year = date_obj.strftime("%Y-%m")
+                    sales_by_oem_year_month[r["oem_name"]][month_year] += r.get("units_sold", 0)
+            except ValueError:
+                pass
 
-        # Preferred order for series keys in the chart's x-axis list
-        final_series_keys_list = []
-        if "Overall Sales" in comprehensive_yoy_series_keys:
-            final_series_keys_list.append("Overall Sales")
-        final_series_keys_list.extend(sorted([k for k in comprehensive_yoy_series_keys if k != "Overall Sales"]))
+    sales_trend_by_oem_data = []
+    all_months = sorted(list(set(month for oem_data in sales_by_oem_year_month.values() for month in oem_data.keys())))
+    for oem, monthly_sales in sales_by_oem_year_month.items():
+        series_data = [{"month": m, "sales": monthly_sales.get(m, 0)} for m in all_months]
+        sales_trend_by_oem_data.append({"oem": oem, "series": series_data})
 
-
-        for year_val in sorted_unique_years:
-            year_data_point = {"year": str(year_val)}
-            
-            if "Overall Sales" in final_series_keys_list:
-                year_data_point["Overall Sales"] = sales_by_year.get(year_val, 0)
-            
-            for oem_name_key in active_oems:
-                year_data_point[f"OEM: {oem_name_key}"] = sales_by_year_oem[oem_name_key].get(year_val, 0)
-            
-          
-            for status_name_key in active_statuses:
-                year_data_point[f"Status: {status_name_key}"] = sales_by_year_status[status_name_key].get(year_val, 0)
-            
-            for channel_name_key in active_channels:
-                year_data_point[f"Channel: {channel_name_key}"] = sales_by_year_channel[channel_name_key].get(year_val, 0)
-            
-            comprehensive_yoy_data_points.append(year_data_point)
-
-        if comprehensive_yoy_data_points:
-            charts.append({
-                "id": "comprehensive_yoy_sales_units",
-                "title": "Comprehensive YoY Sales Units",
-                "xKey": "year", # The primary key for the x-axis (time)
-                "x-axis": final_series_keys_list, # List of all series names to be plotted
-                "y-axis": comprehensive_yoy_data_points # Data: list of {year: 'YYYY', series1: val, series2: val}
-            })
-   
-    # --- Channel-wise sales aggregation by country ---
-    channel_country_sales = defaultdict(lambda: defaultdict(int))
-    for r_dict in rows:
-        channel = infer_channel(r_dict)
-        country_val = r_dict.get("country", "Unknown")
-        units = r_dict.get("units_sold", 0)
-        if units is None: units = 0
-        units = int(units)
-        if channel != "Unknown" and country_val != "Unknown":
-            channel_country_sales[country_val][channel] += units
-
-    channel_sales_chart_data = []
-    all_channels_in_country_data = set()
-    if channel_country_sales: # Check if there's any data
-        for country_data in channel_country_sales.values():
-            all_channels_in_country_data.update(country_data.keys())
-    sorted_channels_for_country_chart = sorted(list(all_channels_in_country_data))
-
-    for country_val, channel_dict in channel_country_sales.items():
-        data_point = {"country": country_val}
-        for ch_name in sorted_channels_for_country_chart:
-            data_point[ch_name] = channel_dict.get(ch_name, 0)
-        channel_sales_chart_data.append(data_point)
-    
-    if channel_sales_chart_data:
-        charts.append({
-            "id": "channel_wise_sales_by_country",
-            "title": "Channel-wise Sales Units by Country",
-            "xKey": "country",
-            "x-axis": sorted_channels_for_country_chart,
-            "y-axis": channel_sales_chart_data
-        })
+    if sales_trend_by_oem_data:
+        charts.append({"id": "sales_trend_by_oem", "xKey": "month", "y-axis": "sales", "seriesKey": "oem", "data": sales_trend_by_oem_data})
 
     return charts
 # @router.get("/supply-aftersales-kpis", response_model=Dict[str, Any])
